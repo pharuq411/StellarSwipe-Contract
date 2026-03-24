@@ -1,5 +1,5 @@
 use crate::types::Asset;
-use soroban_sdk::{Address, Env, Symbol};
+use soroban_sdk::{Address, Env, Symbol, Vec};
 
 pub fn emit_admin_transferred(env: &Env, old_admin: Address, new_admin: Address) {
     let topics = (Symbol::new(env, "admin_transferred"), old_admin, new_admin);
@@ -151,4 +151,44 @@ pub fn emit_signal_updated(env: &Env, signal_id: u64, version: u32, updater: Add
 pub fn emit_copy_recorded(env: &Env, user: Address, signal_id: u64, version: u32) {
     let topics = (Symbol::new(env, "copy_recorded"), signal_id, user);
     env.events().publish(topics, version);
+}
+
+pub fn emit_cross_chain_signal_requested(
+    env: &Env,
+    source_chain: soroban_sdk::String,
+    source_id: soroban_sdk::String,
+    provider: Address,
+) {
+    let topics = (Symbol::new(env, "cross_chain_requested"), provider);
+    env.events().publish(topics, (source_chain, source_id));
+}
+
+pub fn emit_cross_chain_signal_imported(
+    env: &Env,
+    source_chain: soroban_sdk::String,
+    source_id: soroban_sdk::String,
+    stellar_id: u64,
+) {
+    let topics = (Symbol::new(env, "cross_chain_imported"), stellar_id);
+    env.events().publish(topics, (source_chain, source_id));
+}
+
+pub fn emit_cross_chain_address_registered(
+    env: &Env,
+    source_chain: soroban_sdk::String,
+    source_address: soroban_sdk::String,
+    stellar_address: Address,
+) {
+    let topics = (Symbol::new(env, "cross_chain_address_registered"), stellar_address);
+    env.events().publish(topics, (source_chain, source_address));
+}
+
+pub fn emit_cross_chain_signal_synced(
+    env: &Env,
+    source_chain: soroban_sdk::String,
+    source_id: soroban_sdk::String,
+    new_status: u32,
+) {
+    let topics = (Symbol::new(env, "cross_chain_synced"), source_chain, source_id);
+    env.events().publish(topics, new_status);
 }

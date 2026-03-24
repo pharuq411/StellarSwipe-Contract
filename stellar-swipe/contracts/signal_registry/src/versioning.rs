@@ -125,10 +125,6 @@ pub fn update_signal(
 
     Ok(new_version)
 }
-    env.storage().persistent().set(&last_update_key, &current_time);
-
-    Ok(new_version)
-}
 
 pub fn get_signal_history(env: &Env, signal_id: u64) -> Vec<SignalVersion> {
     let version_key = VersioningStorageKey::LatestVersion(signal_id);

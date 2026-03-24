@@ -34,7 +34,7 @@ pub fn validate_tag(tag: &String) -> Result<(), AdminError> {
     
     // Check alphanumeric and basic chars (letters, numbers, hyphen, underscore)
     for byte in bytes.iter() {
-        let b = *byte;
+        let b = byte;
         if !((b >= b'a' && b <= b'z') || 
              (b >= b'A' && b <= b'Z') || 
              (b >= b'0' && b <= b'9') || 
@@ -59,7 +59,7 @@ pub fn validate_tags(tags: &Vec<String>) -> Result<(), AdminError> {
 }
 
 pub fn deduplicate_tags(env: &Env, tags: Vec<String>) -> Vec<String> {
-    let mut unique = Vec::new(env);
+    let mut unique: Vec<String> = Vec::new(env);
     
     for i in 0..tags.len() {
         let tag = tags.get(i).unwrap();
@@ -149,7 +149,7 @@ pub fn auto_suggest_tags(env: &Env, rationale: &String) -> Vec<String> {
     let rationale_lower = rationale.to_bytes();
     
     // Simple keyword matching
-    let keywords = [
+    let keywords: [(&[u8], &str); 11] = [
         (b"breakout", "breakout"),
         (b"breaking", "breakout"),
         (b"resistance", "breakout"),
@@ -164,7 +164,7 @@ pub fn auto_suggest_tags(env: &Env, rationale: &String) -> Vec<String> {
     ];
     
     for (keyword, tag) in keywords.iter() {
-        if contains_bytes(&rationale_lower, keyword) {
+        if contains_bytes(&rationale_lower, *keyword) {
             #[allow(deprecated)]
             suggestions.push_back(String::from_slice(env, tag));
             if suggestions.len() >= 5 {
@@ -178,7 +178,7 @@ pub fn auto_suggest_tags(env: &Env, rationale: &String) -> Vec<String> {
 
 fn contains_bytes(haystack: &soroban_sdk::Bytes, needle: &[u8]) -> bool {
     let hay_len = haystack.len();
-    let needle_len = needle.len();
+    let needle_len = needle.len() as u32;
     
     if needle_len > hay_len {
         return false;
@@ -187,7 +187,7 @@ fn contains_bytes(haystack: &soroban_sdk::Bytes, needle: &[u8]) -> bool {
     for i in 0..=(hay_len - needle_len) {
         let mut matches = true;
         for j in 0..needle_len {
-            if haystack.get(i + j).unwrap() != needle[j] {
+            if haystack.get(i + j).unwrap() != needle[j as usize] {
                 matches = false;
                 break;
             }

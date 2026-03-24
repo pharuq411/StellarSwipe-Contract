@@ -5,6 +5,7 @@ use crate::social::get_follower_count;
 const MIN_SIGNALS_FOR_ANALYTICS: u32 = 10;
 const HOURS_24: u64 = 86400;
 
+#[soroban_sdk::contracttype]
 #[derive(Clone, Debug)]
 pub struct ProviderAnalytics {
     pub provider: Address,
@@ -17,6 +18,7 @@ pub struct ProviderAnalytics {
     pub follower_growth_rate: i128,
 }
 
+#[soroban_sdk::contracttype]
 #[derive(Clone, Debug)]
 pub struct GlobalAnalytics {
     pub total_signals_24h: u32,

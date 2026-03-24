@@ -144,3 +144,16 @@ pub enum VersioningError {
     InvalidExpiry = 906,
     VersionNotFound = 907,
 }
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum CrossChainError {
+    SignalAlreadyExists = 1000,
+    SignalNotFound = 1001,
+    VerificationFailed = 1002,
+    InvalidProof = 1003,
+    AddressNotRegistered = 1004,
+    InvalidSyncStatus = 1005,
+    NotSignalOwner = 1006,
+}
