@@ -14,9 +14,13 @@ mod import;
 mod leaderboard;
 mod performance;
 mod query;
+ feature/cross-chain-sync
+mod scheduling;
+
  feature/emergency-pause-circuit-breaker
 mod scheduling;
 
+ main
 mod reputation;
 mod test_reputation;
  main
@@ -24,6 +28,9 @@ mod social;
 mod stake;
 mod submission;
 mod templates;
+mod types;
+mod combos;
+mod cross_chain;
 mod test_combos;
 mod types;
 mod versioning;
@@ -39,6 +46,8 @@ use admin::{
 };
 use stellar_swipe_common::emergency::{PauseState, CAT_SIGNALS, CAT_TRADING, CAT_STAKES, CAT_ALL};
 use categories::{RiskLevel, SignalCategory};
+use errors::{AdminError, TemplateError, ContestError, VersioningError, CrossChainError};
+pub use leaderboard::{get_leaderboard as get_leaderboard_internal, LeaderboardMetric, ProviderLeaderboard};
 use combos::{
     cancel_combo, create_combo_signal, execute_combo_signal, get_combo, get_combo_executions_pub,
     get_combo_performance, ComboExecution, ComboPerformanceSummary, ComboSignal, ComboType,
@@ -54,6 +63,9 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, Map
 use stellar_swipe_common::{validate_asset_pair as validate_asset_pair_common, AssetPairError};
 use templates::{SignalTemplate, DEFAULT_TEMPLATE_EXPIRY_HOURS};
 use types::{
+    Asset, FeeBreakdown, ImportResultView, ProviderPerformance, Signal, SignalAction,
+    SignalPerformanceView, SignalStatus, SignalSummary, SortOption, TradeExecution,
+    SignalData, RecurrencePattern, CrossChainSignal, SyncStatus, AddressMapping,
     Asset, FeeBreakdown, ImportResultView, ProviderPerformance, RecurrencePattern, Signal,
     SignalAction, SignalData, SignalPerformanceView, SignalStatus, SignalSummary, SortOption,
     TradeExecution,
@@ -94,8 +106,9 @@ pub enum StorageKey {
     ComboCounter,
     Combos,
     ComboExecutions(u64),
+    CrossChainSignals(String, String), // (source_chain, source_signal_id)
+    AddressMappings(String, String),    // (source_chain, source_address)
 }
-
 #[contractimpl]
 impl SignalRegistry {
     /* =========================
@@ -1204,6 +1217,17 @@ impl SignalRegistry {
     ) -> Result<u64, ComboError> {
         provider.require_auth();
 
+      feature/cross-chain-sync
+        let count = components.len();
+        let combo_id =
+            create_combo_signal(&env, &provider, name, components, combo_type)?;
+
+        events::emit_combo_created(
+            &env,
+            combo_id,
+            provider,
+            count,
+
  feature/emergency-pause-circuit-breaker
         let combo_id =
             create_combo_signal(&env, &provider, name, components.clone(), combo_type)?;
@@ -1215,6 +1239,7 @@ impl SignalRegistry {
             &env, combo_id, provider,
             // component count already validated inside create_combo_signal
             components.len(),
+ main
         );
 
         Ok(combo_id)
@@ -1289,6 +1314,12 @@ impl SignalRegistry {
         prize_pool: i128,
     ) -> Result<u64, ContestError> {
         admin.require_auth();
+      feature/cross-chain-sync
+        if is_trading_paused(&env) {
+            return Err(ContestError::ContestNotFound);
+        }
+        contests::create_contest(&env, name, start_time, end_time, metric, min_signals, prize_pool)
+
  feature/emergency-pause-circuit-breaker
         require_not_paused(&env).map_err(|e| match e {
             AdminError::TradingPaused => ContestError::TradingPaused,
@@ -1297,6 +1328,7 @@ impl SignalRegistry {
         })?;
         contests::create_contest(&env, name, start_time, end_time, metric, min_signals, prize_pool)
 
+ main
         require_not_paused(&env)?;
         contests::create_contest(
             &env,
@@ -1401,6 +1433,170 @@ impl SignalRegistry {
     }
 
     /* =========================
+       CROSS-CHAIN SYNC FUNCTIONS
+    ========================== */
+
+    pub fn register_cross_chain_address(
+        env: Env,
+        stellar_address: Address,
+        source_chain: String,
+        source_address: String,
+        proof: Bytes,
+    ) -> Result<(), AdminError> {
+        stellar_address.require_auth();
+        cross_chain::register_address(
+            &env,
+            stellar_address.clone(),
+            source_chain.clone(),
+            source_address.clone(),
+            proof,
+        );
+        events::emit_cross_chain_address_registered(&env, source_chain, source_address, stellar_address);
+        Ok(())
+    }
+
+    pub fn request_signal_import(
+        env: Env,
+        provider: Address,
+        source_chain: String,
+        source_id: String,
+        source_address: String,
+        proof: Bytes,
+    ) -> Result<(), CrossChainError> {
+        provider.require_auth();
+
+        // Ensure address mapping exists
+        let mapping = cross_chain::get_address_mapping(&env, &source_chain, &source_address)
+            .ok_or(CrossChainError::AddressNotRegistered)?;
+
+        if mapping.stellar_address != provider {
+            return Err(CrossChainError::NotSignalOwner);
+        }
+
+        if cross_chain::get_cross_chain_signal(&env, &source_chain, &source_id).is_some() {
+            return Err(CrossChainError::SignalAlreadyExists);
+        }
+
+        let signal = CrossChainSignal {
+            source_chain: source_chain.clone(),
+            source_signal_id: source_id.clone(),
+            stellar_signal_id: 0,
+            provider_source_address: source_address,
+            stellar_address: provider.clone(),
+            verification_proof: proof,
+            sync_status: SyncStatus::Pending,
+        };
+
+        cross_chain::store_cross_chain_signal(
+            &env,
+            source_chain.clone(),
+            source_id.clone(),
+            signal,
+        );
+        events::emit_cross_chain_signal_requested(&env, source_chain, source_id, provider);
+
+        Ok(())
+    }
+
+    pub fn import_verified_signal(
+        env: Env,
+        source_chain: String,
+        source_id: String,
+        asset_pair: String,
+        action: SignalAction,
+        price: i128,
+        rationale: String,
+        expiry: u64,
+    ) -> Result<u64, CrossChainError> {
+        let mut cc_signal = cross_chain::get_cross_chain_signal(&env, &source_chain, &source_id)
+            .ok_or(CrossChainError::SignalNotFound)?;
+
+        if cc_signal.sync_status != SyncStatus::Pending {
+            return Err(CrossChainError::InvalidSyncStatus);
+        }
+
+        // Verify proof (placeholder)
+        if !cross_chain::verify_proof(&env, &cc_signal.verification_proof) {
+            cc_signal.sync_status = SyncStatus::Failed;
+            cross_chain::store_cross_chain_signal(
+                &env,
+                source_chain.clone(),
+                source_id.clone(),
+                cc_signal,
+            );
+            return Err(CrossChainError::VerificationFailed);
+        }
+
+        // Create the signal on Stellar
+        let category = SignalCategory::SwingTrade;
+        let tags = Vec::new(&env);
+        let risk_level = RiskLevel::Medium;
+
+        let stellar_id = Self::create_signal_internal(
+            &env,
+            cc_signal.stellar_address.clone(),
+            asset_pair,
+            action,
+            price,
+            rationale,
+            expiry,
+            category,
+            tags,
+            risk_level,
+        )
+        .map_err(|_| CrossChainError::InvalidProof)?;
+
+        cc_signal.stellar_signal_id = stellar_id;
+        cc_signal.sync_status = SyncStatus::Imported;
+        cross_chain::store_cross_chain_signal(
+            &env,
+            source_chain.clone(),
+            source_id.clone(),
+            cc_signal,
+        );
+
+        events::emit_cross_chain_signal_imported(&env, source_chain, source_id, stellar_id);
+
+        Ok(stellar_id)
+    }
+
+    pub fn sync_signal_update(
+        env: Env,
+        source_chain: String,
+        source_id: String,
+        new_price: Option<i128>,
+        new_rationale: Option<String>,
+    ) -> Result<(), CrossChainError> {
+        let cc_signal = cross_chain::get_cross_chain_signal(&env, &source_chain, &source_id)
+            .ok_or(CrossChainError::SignalNotFound)?;
+
+        if cc_signal.sync_status != SyncStatus::Imported {
+            return Err(CrossChainError::InvalidSyncStatus);
+        }
+
+        let mut signals = Self::get_signals_map(&env);
+        let mut signal = signals
+            .get(cc_signal.stellar_signal_id)
+            .ok_or(CrossChainError::SignalNotFound)?;
+
+        if let Some(price) = new_price {
+            signal.price = price;
+        }
+        if let Some(rat) = new_rationale {
+            signal.rationale = rat;
+        }
+
+        signals.set(cc_signal.stellar_signal_id, signal.clone());
+        Self::save_signals_map(&env, &signals);
+
+        events::emit_cross_chain_signal_synced(
+            &env,
+            source_chain,
+            source_id,
+            signal.status as u32,
+        );
+
+        Ok(())
        TRUST SCORE FUNCTIONS
     ========================== */
 

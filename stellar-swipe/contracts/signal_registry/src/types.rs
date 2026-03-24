@@ -189,3 +189,38 @@ pub struct ScheduledSignal {
     pub recurrence: RecurrencePattern,
     pub status: ScheduleStatus,
 }
+
+// ==========================================
+// CROSS-CHAIN SYNC TYPES (Issue #95)
+// ==========================================
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SyncStatus {
+    Pending,
+    Verified,
+    Imported,
+    UpdatePending,
+    Failed,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CrossChainSignal {
+    pub source_chain: String,
+    pub source_signal_id: String,
+    pub stellar_signal_id: u64,
+    pub provider_source_address: String,
+    pub stellar_address: Address,
+    pub verification_proof: soroban_sdk::Bytes,
+    pub sync_status: SyncStatus,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AddressMapping {
+    pub source_chain: String,
+    pub source_address: String,
+    pub stellar_address: Address,
+    pub is_verified: bool,
+}

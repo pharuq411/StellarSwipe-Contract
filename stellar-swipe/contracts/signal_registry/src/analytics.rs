@@ -10,7 +10,11 @@ use soroban_sdk::{Address, Env, Map, String, Vec};
 const MIN_SIGNALS_FOR_ANALYTICS: u32 = 10;
 const HOURS_24: u64 = 86400;
 
+ feature/cross-chain-sync
+#[soroban_sdk::contracttype]
+
 #[contracttype]
+ main
 #[derive(Clone, Debug)]
 pub struct ProviderAnalytics {
     pub provider: Address,
@@ -23,6 +27,7 @@ pub struct ProviderAnalytics {
     pub follower_growth_rate: i128,
 }
 
+#[soroban_sdk::contracttype]
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct GlobalAnalytics {

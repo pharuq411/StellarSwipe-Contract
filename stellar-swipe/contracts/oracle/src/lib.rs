@@ -796,6 +796,7 @@ pub fn on_price_update(env: &Env, pair: AssetPair) {
     metadata.update_count_24h += 1;
     staleness::set_metadata(env, &pair, metadata);
 }
+}
 
 #[cfg(test)]
 mod test;
