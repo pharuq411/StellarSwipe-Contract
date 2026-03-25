@@ -588,6 +588,59 @@ impl AutoTradeContract {
     ) -> Option<portfolio_insurance::PortfolioInsurance> {
         portfolio_insurance::get_insurance(&env, &user)
     }
+
+    // ── Grid Trading Strategy (Issue #104) ───────────────────────────────────
+
+    /// Initialise a grid strategy and return its id.
+    pub fn init_grid(
+        env: Env,
+        user: Address,
+        asset_pair: u32,
+        upper_price: i128,
+        lower_price: i128,
+        num_grids: u32,
+        total_capital: i128,
+    ) -> Result<u64, AutoTradeError> {
+        user.require_auth();
+        strategies::grid::initialize_grid_strategy(
+            &env,
+            user,
+            asset_pair,
+            upper_price,
+            lower_price,
+            num_grids,
+            total_capital,
+        )
+    }
+
+    /// Place limit orders across all grid levels.
+    pub fn place_grid_orders(env: Env, strategy_id: u64) -> Result<(), AutoTradeError> {
+        strategies::grid::place_grid_orders(&env, strategy_id)
+    }
+
+    /// Record a filled grid order and optionally rebalance.
+    pub fn grid_order_filled(
+        env: Env,
+        strategy_id: u64,
+        order_id: u64,
+        fill_price: i128,
+        fill_amount: i128,
+    ) -> Result<(), AutoTradeError> {
+        strategies::grid::on_grid_order_filled(&env, strategy_id, order_id, fill_price, fill_amount)
+    }
+
+    /// Shift the grid if price has moved outside the configured range.
+    pub fn adjust_grid(env: Env, strategy_id: u64) -> Result<(), AutoTradeError> {
+        strategies::grid::adjust_grid_to_price_movement(&env, strategy_id)
+    }
+
+    /// Return performance metrics for a grid strategy.
+    pub fn grid_performance(
+        env: Env,
+        strategy_id: u64,
+    ) -> Result<strategies::grid::GridPerformance, AutoTradeError> {
+        strategies::grid::calculate_grid_performance(&env, strategy_id)
+    }
 }
 
 mod test;
