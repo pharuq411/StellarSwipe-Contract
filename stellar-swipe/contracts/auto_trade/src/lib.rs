@@ -638,6 +638,96 @@ impl AutoTradeContract {
     ) -> Result<strategies::grid::GridPerformance, AutoTradeError> {
         strategies::grid::calculate_grid_performance(&env, strategy_id)
     }
+
+    // ── Pairs Trading Strategy (Issue #106) ───────────────────────────────────
+
+    pub fn configure_pairs_strategy(
+        env: Env,
+        user: Address,
+        asset_a: u32,
+        asset_b: u32,
+        lookback_period_days: u32,
+        entry_z_score: i128,
+        exit_z_score: i128,
+        position_size_pct: u32,
+    ) -> Result<u64, AutoTradeError> {
+        user.require_auth();
+        strategies::pairs_trading::configure_pairs_strategy(
+            &env,
+            user,
+            asset_a,
+            asset_b,
+            lookback_period_days,
+            entry_z_score,
+            exit_z_score,
+            position_size_pct,
+        )
+    }
+
+    pub fn get_pairs_trading_strategy(
+        env: Env,
+        user: Address,
+        strategy_id: u64,
+    ) -> Result<strategies::pairs_trading::PairsTradingStrategy, AutoTradeError> {
+        strategies::pairs_trading::get_pairs_trading_strategy(&env, &user, strategy_id)
+    }
+
+    pub fn analyze_asset_pair(
+        env: Env,
+        asset_a: u32,
+        asset_b: u32,
+        lookback_days: u32,
+    ) -> Result<strategies::pairs_trading::PairAnalysis, AutoTradeError> {
+        strategies::pairs_trading::analyze_asset_pair(&env, asset_a, asset_b, lookback_days)
+    }
+
+    pub fn check_pairs_trading_signal(
+        env: Env,
+        user: Address,
+        strategy_id: u64,
+    ) -> Result<Option<strategies::pairs_trading::PairsSignal>, AutoTradeError> {
+        strategies::pairs_trading::check_pairs_trading_signal(&env, &user, strategy_id)
+    }
+
+    pub fn execute_pairs_trade(
+        env: Env,
+        user: Address,
+        strategy_id: u64,
+        signal: strategies::pairs_trading::PairsSignal,
+        portfolio_value: i128,
+    ) -> Result<u64, AutoTradeError> {
+        user.require_auth();
+        strategies::pairs_trading::execute_pairs_trade(
+            &env,
+            &user,
+            strategy_id,
+            signal,
+            portfolio_value,
+        )
+    }
+
+    pub fn check_pairs_exit(
+        env: Env,
+        user: Address,
+        strategy_id: u64,
+    ) -> Result<Option<u64>, AutoTradeError> {
+        user.require_auth();
+        strategies::pairs_trading::check_pairs_exit(&env, &user, strategy_id)
+    }
+
+    pub fn calculate_optimal_hedge_ratio(
+        env: Env,
+        asset_a: u32,
+        asset_b: u32,
+        lookback_days: u32,
+    ) -> Result<i128, AutoTradeError> {
+        strategies::pairs_trading::calculate_optimal_hedge_ratio(
+            &env,
+            asset_a,
+            asset_b,
+            lookback_days,
+        )
+    }
 }
 
 mod test;

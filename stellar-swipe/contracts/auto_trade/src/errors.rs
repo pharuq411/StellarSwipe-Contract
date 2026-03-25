@@ -14,18 +14,25 @@ pub enum AutoTradeError {
     StopLossTriggered = 9,
     TradingPaused = 10,
 
-    StrategyNotFound = 10,
-    PositionAlreadyExists = 11,
-    InsufficientPriceHistory = 12,
+    StrategyNotFound = 11,
+    PositionAlreadyExists = 12,
     RankingDisabled = 13,
 
-    InvalidBasketSize = 10,
-    InsufficientPriceHistory = 11,
-    InvalidPriceData = 12,
-    NonCointegratedBasket = 13,
-    ActivePortfolioExists = 14,
-    NoActivePortfolio = 15,
-    NoTradeSignal = 16,
-    InvalidStatArbConfig = 17,
+    InvalidBasketSize = 14,
+    InsufficientPriceHistory = 15,
+    InvalidPriceData = 16,
+    NonCointegratedBasket = 17,
+    ActivePortfolioExists = 18,
+    NoActivePortfolio = 19,
+    NoTradeSignal = 20,
+    InvalidStatArbConfig = 21,
+    
+    // Pairs Trading
+    PairsStrategyNotFound = 22,
+    PairsActivePositionExists = 23,
+    PairsNoActivePosition = 24,
+    InsufficientCorrelation = 25,
+    PairNotCointegrated = 26,
+    InvalidPairsConfig = 27,
  
 }
