@@ -110,6 +110,14 @@ pub fn can_submit_signal(
     Ok(())
 }
 
+/// Get stake information for a provider
+/// TODO: Integrate with main contract storage once stake functionality is added
+pub fn get_stake_info(_env: &Env, _provider: &Address) -> Option<StakeInfo> {
+    // For now, return None until stake functionality is integrated
+    // This will result in stake component scoring as 0
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

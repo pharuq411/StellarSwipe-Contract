@@ -1,8 +1,13 @@
+ feature/emergency-pause-circuit-breaker
 use soroban_sdk::{Address, Env, Vec, crypto::Ed25519Signature, xdr::ToXdr};
-use common::{AssetPair};
+use stellar_swipe_common::AssetPair;
+
+ main
 use crate::errors::OracleError;
 use crate::reputation::{get_oracle_stats, slash_oracle, SlashReason};
 use crate::types::ExternalPrice;
+use common::AssetPair;
+use soroban_sdk::{crypto::Ed25519Signature, xdr::ToXdr, Address, Env, Vec};
 
 pub fn process_external_prices(env: &Env, prices: Vec<ExternalPrice>) -> Result<i128, OracleError> {
     if prices.is_empty() {
@@ -22,7 +27,7 @@ pub fn process_external_prices(env: &Env, prices: Vec<ExternalPrice>) -> Result<
         let sig_verify = env.crypto().ed25519_verify(
             &data.oracle_address.to_xdr(env),
             &msg,
-            &data.signature.clone().into()
+            &data.signature.clone().into(),
         );
 
         if sig_verify.is_err() {
@@ -32,13 +37,16 @@ pub fn process_external_prices(env: &Env, prices: Vec<ExternalPrice>) -> Result<
 
         // 2. Freshness Check
         if env.ledger().timestamp().saturating_sub(data.timestamp) > 300 {
-            continue; 
+            continue;
         }
 
         // 3. Weighting
         let weight = get_oracle_stats(env, &data.oracle_address).weight as i128;
         if weight > 0 {
-            weighted_sum += data.price.checked_mul(weight).ok_or(OracleError::Overflow)?;
+            weighted_sum += data
+                .price
+                .checked_mul(weight)
+                .ok_or(OracleError::Overflow)?;
             total_weight += weight;
         }
     }

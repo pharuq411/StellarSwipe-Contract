@@ -27,6 +27,26 @@ impl Default for RiskConfig {
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RiskParityConfig {
+    pub enabled: bool,
+    pub rebalance_frequency_days: u32,
+    pub threshold_pct: u32, // e.g. 5 for 5%
+    pub last_rebalance: u64,
+}
+
+impl Default for RiskParityConfig {
+    fn default() -> Self {
+        RiskParityConfig {
+            enabled: false,
+            rebalance_frequency_days: 7,
+            threshold_pct: 5,
+            last_rebalance: 0,
+        }
+    }
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Position {
     pub asset_id: u32,
     pub amount: i128,
@@ -45,10 +65,16 @@ pub struct TradeRecord {
 #[contracttype]
 pub enum RiskDataKey {
     UserRiskConfig(Address),
+    UserRiskParityConfig(Address),
     UserPositions(Address),
     UserTradeHistory(Address),
     AssetPrice(u32),
+    AssetPriceHistory(u32, u32), // (asset_id, slot)
+    AssetPriceHistoryCount(u32),
 }
+
+pub const DEFAULT_VOLATILITY_BPS: i128 = 2000;
+pub const MIN_PRICE_HISTORY: usize = 2;
 
 /// ==========================
 /// Risk Configuration Management
@@ -64,6 +90,88 @@ pub fn set_risk_config(env: &Env, user: &Address, config: &RiskConfig) {
     env.storage()
         .persistent()
         .set(&RiskDataKey::UserRiskConfig(user.clone()), config);
+}
+
+pub fn get_risk_parity_config(env: &Env, user: &Address) -> RiskParityConfig {
+    env.storage()
+        .persistent()
+        .get(&RiskDataKey::UserRiskParityConfig(user.clone()))
+        .unwrap_or_default()
+}
+
+pub fn set_risk_parity_config(env: &Env, user: &Address, config: &RiskParityConfig) {
+    env.storage()
+        .persistent()
+        .set(&RiskDataKey::UserRiskParityConfig(user.clone()), config);
+}
+
+/// ==========================
+/// Volatility Calculation
+/// ==========================
+
+pub fn record_price(env: &Env, asset_id: u32, price: i128) {
+    let count: u32 = env.storage().persistent().get(&RiskDataKey::AssetPriceHistoryCount(asset_id)).unwrap_or(0);
+    let slot = count % 30; // Store last 30 prices
+    env.storage().persistent().set(&RiskDataKey::AssetPriceHistory(asset_id, slot), &price);
+    env.storage().persistent().set(&RiskDataKey::AssetPriceHistoryCount(asset_id), &(count + 1));
+}
+
+fn get_price_history(env: &Env, asset_id: u32, window: u32) -> Vec<i128> {
+    let mut prices = Vec::new(env);
+    let count: u32 = env.storage().persistent().get(&RiskDataKey::AssetPriceHistoryCount(asset_id)).unwrap_or(0);
+    if count == 0 { return prices; }
+
+    let window = window.min(count).min(30);
+    for i in 0..window {
+        let idx = (count + 30 - 1 - i) % 30;
+        if let Some(price) = env.storage().persistent().get(&RiskDataKey::AssetPriceHistory(asset_id, idx)) {
+            prices.push_front(price);
+        }
+    }
+    prices
+}
+
+fn isqrt(n: i128) -> i128 {
+    if n <= 0 { return 0; }
+    let mut x = n;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
+}
+
+pub fn calculate_volatility(env: &Env, asset_id: u32, window: u32) -> i128 {
+    let prices = get_price_history(env, asset_id, window + 1);
+    if (prices.len() as usize) < MIN_PRICE_HISTORY {
+        return DEFAULT_VOLATILITY_BPS;
+    }
+
+    let mut returns = Vec::new(env);
+    for i in 1..prices.len() {
+        let prev = prices.get(i-1).unwrap();
+        let curr = prices.get(i).unwrap();
+        if prev > 0 {
+            returns.push_back((curr - prev) * 10000 / prev);
+        }
+    }
+
+    if returns.is_empty() { return DEFAULT_VOLATILITY_BPS; }
+
+    let mut sum = 0i128;
+    for r in returns.iter() { sum += r; }
+    let mean = sum / (returns.len() as i128);
+
+    let mut var_sum = 0i128;
+    for r in returns.iter() {
+        let diff = r - mean;
+        var_sum += diff * diff;
+    }
+    let variance = var_sum / (returns.len() as i128);
+    let vol = isqrt(variance);
+
+    if vol == 0 { DEFAULT_VOLATILITY_BPS } else { vol }
 }
 
 /// ==========================

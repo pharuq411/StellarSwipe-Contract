@@ -1,0 +1,464 @@
+//! Trust score calculation for signal providers
+//!
+//! Trust score combines multiple factors to provide a holistic reliability metric:
+//! - 40%: Success rate (successful_signals / total_signals)
+//! - 20%: Consistency (inverse of ROI variance across signals)
+//! - 15%: Stake amount (normalized vs median stake)
+//! - 15%: Follower count (normalized vs median followers)
+//! - 10%: Tenure (days since first signal)
+//!
+//! Score ranges from 0-100, with tiers:
+//! - 80-100: "Highly Trusted" (green badge)
+//! - 60-79: "Trusted" (blue badge)
+//! - 40-59: "Emerging" (yellow badge)
+//! - 0-39: "New/Unproven" (gray badge)
+
+use soroban_sdk::{contracttype, Address, Env, Map, Vec};
+use crate::types::ProviderPerformance;
+use crate::stake::StakeInfo;
+use crate::social;
+
+const TRUST_SCORE_SCALE: u32 = 100; // 0-100 scale
+const MIN_SIGNALS_FOR_TRUST_SCORE: u32 = 5; // Minimum signals to calculate trust score
+
+// Trust score component weights (in basis points, total = 10000)
+const SUCCESS_RATE_WEIGHT: u32 = 4000; // 40%
+const CONSISTENCY_WEIGHT: u32 = 2000;  // 20%
+const STAKE_WEIGHT: u32 = 1500;        // 15%
+const FOLLOWER_WEIGHT: u32 = 1500;     // 15%
+const TENURE_WEIGHT: u32 = 1000;       // 10%
+
+// Maximum tenure days for full score (365 days = 100%)
+const MAX_TENURE_DAYS: u64 = 365;
+// Seconds per day
+const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TrustScoreTier {
+    HighlyTrusted, // 80-100
+    Trusted,       // 60-79
+    Emerging,      // 40-59
+    NewUnproven,   // 0-39
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TrustScoreComponents {
+    pub success_rate: u32,        // 0-10000 (basis points)
+    pub consistency: u32,         // 0-10000 (basis points)
+    pub stake_normalized: u32,    // 0-10000 (basis points)
+    pub followers_normalized: u32, // 0-10000 (basis points)
+    pub tenure_normalized: u32,   // 0-10000 (basis points)
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TrustScoreDetails {
+    pub score: u32,               // 0-100
+    pub tier: TrustScoreTier,
+    pub components: TrustScoreComponents,
+    pub has_sufficient_history: bool, // true if >= MIN_SIGNALS_FOR_TRUST_SCORE
+    pub last_updated: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub enum ReputationDataKey {
+    /// provider -> TrustScoreDetails
+    TrustScore(Address),
+    /// provider -> u64 (timestamp of first signal)
+    FirstSignalTime(Address),
+    /// Global median stake amount for normalization
+    MedianStake,
+    /// Global median follower count for normalization
+    MedianFollowers,
+}
+
+/// Calculate trust score for a provider
+///
+/// # Arguments
+/// * `env` - Soroban environment
+/// * `provider` - Provider address
+/// * `performance` - Provider performance data
+/// * `stake_info` - Provider stake information
+///
+/// # Returns
+/// TrustScoreDetails with score, tier, and component breakdown
+pub fn calculate_trust_score(
+    env: &Env,
+    provider: &Address,
+    performance: &ProviderPerformance,
+    stake_info: &Option<StakeInfo>,
+) -> TrustScoreDetails {
+    let now = env.ledger().timestamp();
+
+    // Check if provider has sufficient history
+    let has_sufficient_history = performance.total_signals >= MIN_SIGNALS_FOR_TRUST_SCORE;
+
+    // If insufficient history, return zero score
+    if !has_sufficient_history {
+        return TrustScoreDetails {
+            score: 0,
+            tier: TrustScoreTier::NewUnproven,
+            components: TrustScoreComponents {
+                success_rate: 0,
+                consistency: 0,
+                stake_normalized: 0,
+                followers_normalized: 0,
+                tenure_normalized: 0,
+            },
+            has_sufficient_history: false,
+            last_updated: now,
+        };
+    }
+
+    // Calculate individual components
+    let success_rate_component = calculate_success_rate_component(performance);
+    let consistency_component = calculate_consistency_component(env, provider);
+    let stake_component = calculate_stake_component(env, stake_info);
+    let follower_component = calculate_follower_component(env, provider);
+    let tenure_component = calculate_tenure_component(env, provider, now);
+
+    // Combine components using weights
+    let score = calculate_weighted_score(
+        success_rate_component,
+        consistency_component,
+        stake_component,
+        follower_component,
+        tenure_component,
+    );
+
+    let tier = get_trust_score_tier(score);
+
+    TrustScoreDetails {
+        score,
+        tier,
+        components: TrustScoreComponents {
+            success_rate: success_rate_component,
+            consistency: consistency_component,
+            stake_normalized: stake_component,
+            followers_normalized: follower_component,
+            tenure_normalized: tenure_component,
+        },
+        has_sufficient_history: true,
+        last_updated: now,
+    }
+}
+
+/// Calculate success rate component (40% weight)
+/// Returns 0-10000 basis points
+fn calculate_success_rate_component(performance: &ProviderPerformance) -> u32 {
+    if performance.total_signals == 0 {
+        return 0;
+    }
+
+    // success_rate is already in basis points (0-10000)
+    performance.success_rate
+}
+
+/// Calculate consistency component (20% weight)
+/// Measures inverse of ROI variance - lower variance = higher consistency
+/// Returns 0-10000 basis points
+fn calculate_consistency_component(env: &Env, provider: &Address) -> u32 {
+    // For now, return a placeholder based on success rate
+    // In a full implementation, this would calculate ROI variance across signals
+    // Higher consistency = lower variance = higher score
+
+    // Placeholder: use success rate as proxy for consistency
+    // TODO: Implement actual ROI variance calculation
+    let performance = get_provider_performance(env, provider);
+    if performance.total_signals < 2 {
+        return 5000; // Neutral score for providers with limited history
+    }
+
+    // Simple heuristic: higher success rate = higher consistency
+    (performance.success_rate as u64 * 8 / 10) as u32 // Scale to 0-8000, then can add variance penalty
+}
+
+/// Calculate stake component (15% weight)
+/// Normalized against median stake amount
+/// Returns 0-10000 basis points
+fn calculate_stake_component(env: &Env, stake_info: &Option<StakeInfo>) -> u32 {
+    let stake_amount = match stake_info {
+        Some(info) => info.amount,
+        None => 0,
+    };
+
+    if stake_amount <= 0 {
+        return 0;
+    }
+
+    let median_stake = get_median_stake(env);
+
+    if median_stake <= 0 {
+        return 5000; // Neutral if no median available
+    }
+
+    // Normalize: stake_amount / median_stake, capped at 2x median
+    let ratio = if stake_amount > median_stake * 2 {
+        2_0000 // 200% of median = 100% score
+    } else {
+        (stake_amount as u64 * 10000 / median_stake as u64) as u32
+    };
+
+    ratio.min(10000)
+}
+
+/// Calculate follower component (15% weight)
+/// Normalized against median follower count
+/// Returns 0-10000 basis points
+fn calculate_follower_component(env: &Env, provider: &Address) -> u32 {
+    let follower_count = social::get_follower_count(env, provider) as u64;
+
+    let median_followers = get_median_followers(env);
+
+    if median_followers <= 0 {
+        return 5000; // Neutral if no median available
+    }
+
+    // Normalize: follower_count / median_followers, capped at 3x median
+    let ratio = if follower_count > median_followers * 3 {
+        3_0000 // 300% of median = 100% score
+    } else {
+        (follower_count * 10000 / median_followers) as u32
+    };
+
+    ratio.min(10000)
+}
+
+/// Calculate tenure component (10% weight)
+/// Days since first signal, normalized to 365 days max
+/// Returns 0-10000 basis points
+fn calculate_tenure_component(env: &Env, provider: &Address, now: u64) -> u32 {
+    let first_signal_time = get_first_signal_time(env, provider);
+
+    if first_signal_time == 0 {
+        return 0;
+    }
+
+    let days_since_first = (now - first_signal_time) / SECONDS_PER_DAY;
+
+    if days_since_first >= MAX_TENURE_DAYS {
+        10000 // Max score for established providers
+    } else {
+        ((days_since_first as u64 * 10000) / MAX_TENURE_DAYS) as u32
+    }
+}
+
+/// Calculate weighted trust score from components
+fn calculate_weighted_score(
+    success_rate: u32,
+    consistency: u32,
+    stake: u32,
+    followers: u32,
+    tenure: u32,
+) -> u32 {
+    let score = (success_rate as u64 * SUCCESS_RATE_WEIGHT as u64 / 100 +
+                 consistency as u64 * CONSISTENCY_WEIGHT as u64 / 100 +
+                 stake as u64 * STAKE_WEIGHT as u64 / 100 +
+                 followers as u64 * FOLLOWER_WEIGHT as u64 / 100 +
+                 tenure as u64 * TENURE_WEIGHT as u64 / 100) / 100;
+
+    score.min(TRUST_SCORE_SCALE as u64) as u32
+}
+
+/// Get trust score tier from score
+fn get_trust_score_tier(score: u32) -> TrustScoreTier {
+    match score {
+        80..=100 => TrustScoreTier::HighlyTrusted,
+        60..=79 => TrustScoreTier::Trusted,
+        40..=59 => TrustScoreTier::Emerging,
+        _ => TrustScoreTier::NewUnproven,
+    }
+}
+
+/// Get stored trust score for provider
+pub fn get_trust_score(env: &Env, provider: &Address) -> Option<TrustScoreDetails> {
+    env.storage()
+        .persistent()
+        .get(&ReputationDataKey::TrustScore(provider.clone()))
+}
+
+/// Store trust score for provider
+pub fn store_trust_score(env: &Env, provider: &Address, score: &TrustScoreDetails) {
+    env.storage()
+        .persistent()
+        .set(&ReputationDataKey::TrustScore(provider.clone()), score);
+}
+
+/// Update trust score for provider (called when performance changes)
+pub fn update_trust_score(
+    env: &Env,
+    provider: &Address,
+    performance: &ProviderPerformance,
+    stake_info: &Option<StakeInfo>,
+) {
+    let score_details = calculate_trust_score(env, provider, performance, stake_info);
+    store_trust_score(env, provider, &score_details);
+}
+
+/// Record first signal time for tenure calculation
+pub fn record_first_signal(env: &Env, provider: &Address) {
+    let key = ReputationDataKey::FirstSignalTime(provider.clone());
+    let existing_time: Option<u64> = env.storage().persistent().get(&key);
+
+    if existing_time.is_none() {
+        let now = env.ledger().timestamp();
+        env.storage().persistent().set(&key, &now);
+    }
+}
+
+/// Get first signal time for provider
+fn get_first_signal_time(env: &Env, provider: &Address) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&ReputationDataKey::FirstSignalTime(provider.clone()))
+        .unwrap_or(0)
+}
+
+/// Get provider performance (helper function)
+fn get_provider_performance(env: &Env, provider: &Address) -> ProviderPerformance {
+    // This would typically come from analytics or performance module
+    // For now, return default - in real implementation, this would query the actual data
+    env.storage()
+        .persistent()
+        .get(&crate::StorageKey::ProviderStats)
+        .and_then(|stats: Map<Address, ProviderPerformance>| stats.get(provider.clone()))
+        .unwrap_or_default()
+}
+
+/// Get median stake amount across all providers
+fn get_median_stake(env: &Env) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&ReputationDataKey::MedianStake)
+        .unwrap_or(100_000_000) // Default 100 XLM
+}
+
+/// Get median follower count across all providers
+fn get_median_followers(env: &Env) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&ReputationDataKey::MedianFollowers)
+        .unwrap_or(50) // Default 50 followers
+}
+
+/// Update global median values (called periodically by admin)
+pub fn update_median_values(env: &Env, median_stake: i128, median_followers: u64) {
+    env.storage()
+        .persistent()
+        .set(&ReputationDataKey::MedianStake, &median_stake);
+    env.storage()
+        .persistent()
+        .set(&ReputationDataKey::MedianFollowers, &median_followers);
+}
+
+/// Get all trust scores for leaderboard
+pub fn get_all_trust_scores(env: &Env) -> Vec<(Address, TrustScoreDetails)> {
+    // This is a simplified implementation
+    // In practice, you'd need to iterate through all providers
+    // For now, return empty vec - would need proper implementation
+    Vec::new(env)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+
+    #[test]
+    fn test_trust_score_tiers() {
+        assert_eq!(get_trust_score_tier(85), TrustScoreTier::HighlyTrusted);
+        assert_eq!(get_trust_score_tier(75), TrustScoreTier::Trusted);
+        assert_eq!(get_trust_score_tier(50), TrustScoreTier::Emerging);
+        assert_eq!(get_trust_score_tier(25), TrustScoreTier::NewUnproven);
+    }
+
+    #[test]
+    fn test_calculate_weighted_score() {
+        // Test with all components at 100% (10000 basis points)
+        let score = calculate_weighted_score(10000, 10000, 10000, 10000, 10000);
+        assert_eq!(score, 100);
+
+        // Test with all components at 50% (5000 basis points)
+        let score = calculate_weighted_score(5000, 5000, 5000, 5000, 5000);
+        assert_eq!(score, 50);
+    }
+
+    #[test]
+    fn test_insufficient_history() {
+        let env = Env::default();
+        let provider = Address::generate(&env);
+        let performance = ProviderPerformance {
+            total_signals: 3, // Less than MIN_SIGNALS_FOR_TRUST_SCORE
+            successful_signals: 2,
+            failed_signals: 1,
+            total_copies: 10,
+            success_rate: 6667, // 66.67%
+            avg_return: 500,
+            total_volume: 1000000,
+        };
+
+        let score_details = calculate_trust_score(&env, &provider, &performance, &None);
+        assert_eq!(score_details.score, 0);
+        assert_eq!(score_details.tier, TrustScoreTier::NewUnproven);
+        assert!(!score_details.has_sufficient_history);
+    }
+
+    #[test]
+    fn test_success_rate_component() {
+        let performance = ProviderPerformance {
+            success_rate: 7500, // 75%
+            ..Default::default()
+        };
+
+        let component = calculate_success_rate_component(&performance);
+        assert_eq!(component, 7500);
+    }
+
+    #[test]
+    fn test_stake_component() {
+        let env = Env::default();
+
+        // Set median stake to 100 XLM
+        update_median_values(&env, 100_000_000, 50);
+
+        // Test with 200 XLM stake (2x median)
+        let stake_info = Some(StakeInfo {
+            amount: 200_000_000,
+            last_signal_time: 0,
+            locked_until: 0,
+        });
+
+        let component = calculate_stake_component(&env, &stake_info);
+        assert_eq!(component, 10000); // 100% score (capped at 2x median)
+
+        // Test with 50 XLM stake (0.5x median)
+        let stake_info = Some(StakeInfo {
+            amount: 50_000_000,
+            last_signal_time: 0,
+            locked_until: 0,
+        });
+
+        let component = calculate_stake_component(&env, &stake_info);
+        assert_eq!(component, 5000); // 50% score
+    }
+
+    #[test]
+    fn test_tenure_component() {
+        let env = Env::default();
+        let provider = Address::generate(&env);
+
+        // Set first signal time to 100 days ago
+        let now = env.ledger().timestamp();
+        let first_signal_time = now - (100 * SECONDS_PER_DAY);
+        env.storage()
+            .persistent()
+            .set(&ReputationDataKey::FirstSignalTime(provider.clone()), &first_signal_time);
+
+        let component = calculate_tenure_component(&env, &provider, now);
+        // 100 days out of 365 = ~27.4% score
+        assert_eq!(component, 2739); // Approximately 27.39%
+    }
+}

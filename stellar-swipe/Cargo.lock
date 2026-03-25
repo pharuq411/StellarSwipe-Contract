@@ -155,6 +155,7 @@ name = "auto_trade"
 version = "0.0.0"
 dependencies = [
  "soroban-sdk",
+ "stellar_swipe_common",
 ]
 
 [[package]]
@@ -188,6 +189,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "bridge"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+ "stellar_swipe_common",
 ]
 
 [[package]]
@@ -634,6 +643,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "governance"
+version = "0.0.0"
+dependencies = [
+ "soroban-sdk",
+ "stellar_swipe_common",
+]
+
+[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -885,6 +902,14 @@ name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
+
+[[package]]
+name = "oracle"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+ "stellar_swipe_common",
+]
 
 [[package]]
 name = "p256"

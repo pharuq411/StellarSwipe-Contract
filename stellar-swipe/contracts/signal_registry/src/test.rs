@@ -3,7 +3,8 @@
 extern crate std;
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, Env};
+use soroban_sdk::{testutils::Address as _, Env, vec, String};
+use crate::categories::{SignalCategory, RiskLevel};
 
 #[test]
 fn test_initialize_and_admin() {
@@ -60,6 +61,9 @@ fn create_and_read_signal() {
         &100_000,
         &String::from_str(&env, "Breakout confirmed"),
         &expiry,
+        &SignalCategory::SwingTrade,
+        &vec![&env, String::from_str(&env, "test")],
+        &RiskLevel::Medium,
     );
 
     let signal = client.get_signal(&signal_id).unwrap();
@@ -89,6 +93,9 @@ fn test_invalid_asset_pair_rejected() {
         &100_000,
         &String::from_str(&env, "Test"),
         &expiry,
+        &SignalCategory::SwingTrade,
+        &vec![&env, String::from_str(&env, "test")],
+        &RiskLevel::Medium,
     );
     assert!(result.is_err());
 
@@ -99,6 +106,9 @@ fn test_invalid_asset_pair_rejected() {
         &100_000,
         &String::from_str(&env, "Test"),
         &expiry,
+        &SignalCategory::SwingTrade,
+        &vec![&env, String::from_str(&env, "test")],
+        &RiskLevel::Medium,
     );
     assert!(result.is_err());
 
@@ -109,6 +119,9 @@ fn test_invalid_asset_pair_rejected() {
         &100_000,
         &String::from_str(&env, "Test"),
         &expiry,
+        &SignalCategory::SwingTrade,
+        &vec![&env, String::from_str(&env, "test")],
+        &RiskLevel::Medium,
     );
     assert!(result.is_err());
 }
@@ -138,6 +151,9 @@ fn test_custom_asset_pair_with_issuer() {
         &100_000,
         &String::from_str(&env, "Full format"),
         &expiry,
+        &SignalCategory::SwingTrade,
+        &vec![&env, String::from_str(&env, "test")],
+        &RiskLevel::Medium,
     );
 
     assert!(signal_id > 0);
@@ -170,6 +186,9 @@ fn test_pause_blocks_signals() {
         &100_000,
         &String::from_str(&env, "Test"),
         &expiry,
+        &SignalCategory::SwingTrade,
+        &vec![&env, String::from_str(&env, "test")],
+        &RiskLevel::Medium,
     );
 
     assert!(result.is_err());
@@ -186,6 +205,9 @@ fn test_pause_blocks_signals() {
         &100_000,
         &String::from_str(&env, "Test"),
         &expiry,
+        &SignalCategory::SwingTrade,
+        &vec![&env, String::from_str(&env, "test")],
+        &RiskLevel::Medium,
     );
 
     assert!(signal_id > 0);
@@ -412,6 +434,9 @@ fn provider_stats_initialized() {
         &200_000,
         &String::from_str(&env, "Resistance hit"),
         &expiry,
+        &SignalCategory::SwingTrade,
+        &vec![&env, String::from_str(&env, "test")],
+        &RiskLevel::Medium,
     );
 
     let stats = client.get_provider_stats(&provider).unwrap();
@@ -533,6 +558,9 @@ fn test_get_active_signals_excludes_expired() {
             &100_000,
             &String::from_str(&env, "Active"),
             &(current_time + 10000),
+            &SignalCategory::SwingTrade,
+            &vec![&env, String::from_str(&env, "test")],
+            &RiskLevel::Medium,
         );
     }
 
@@ -545,6 +573,9 @@ fn test_get_active_signals_excludes_expired() {
             &200_000,
             &String::from_str(&env, "Expired"),
             &(current_time + 10),
+            &SignalCategory::SwingTrade,
+            &vec![&env, String::from_str(&env, "test")],
+            &RiskLevel::Medium,
         );
     }
 
@@ -591,6 +622,9 @@ fn test_cleanup_batch_limit() {
             &100_000,
             &String::from_str(&env, "Test"),
             &(current_time + 10),
+            &SignalCategory::SwingTrade,
+            &vec![&env, String::from_str(&env, "test")],
+            &RiskLevel::Medium,
         );
     }
 
@@ -637,6 +671,9 @@ fn test_pending_expiry_count() {
             &100_000,
             &String::from_str(&env, "Test"),
             &(current_time + 10),
+            &SignalCategory::SwingTrade,
+            &vec![&env, String::from_str(&env, "test")],
+            &RiskLevel::Medium,
         );
     }
 
@@ -787,6 +824,9 @@ fn test_feed_filtered_by_followed() {
         &100_000,
         &String::from_str(&env, "A1"),
         &(current_time + 10000),
+        &SignalCategory::SwingTrade,
+        &vec![&env, String::from_str(&env, "A")],
+        &RiskLevel::Medium,
     );
     client.create_signal(
         &provider_b,
@@ -795,6 +835,9 @@ fn test_feed_filtered_by_followed() {
         &100_000,
         &String::from_str(&env, "B1"),
         &(current_time + 10000),
+        &SignalCategory::DayTrade,
+        &vec![&env, String::from_str(&env, "B")],
+        &RiskLevel::High,
     );
 
     // User follows only provider_a

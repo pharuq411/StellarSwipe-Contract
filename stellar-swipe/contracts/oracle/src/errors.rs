@@ -19,4 +19,12 @@ pub enum OracleError {
     LowReputation = 12,
     InsufficientHistoricalData = 13,
     UnreliablePrice = 14,
+    NoPathFound = 15,
+    SlippageExceeded = 16,
+    EmptyOrderBook = 17,
+    WideSpreadDetected = 18,
+    InsufficientLiquidity = 19,
+    Overflow = 20,
+    CircuitBreakerTripped = 21,
+    PriceStaleTradeBlocked = 22,
 }

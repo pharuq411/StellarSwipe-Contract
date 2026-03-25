@@ -1,12 +1,21 @@
-use soroban_sdk::{Env, Address, Vec, panic_with_error};
-use common::{Asset, AssetPair};
-use crate::errors::OracleError;
+ feature/emergency-pause-circuit-breaker
+use soroban_sdk::{contracttype, Env, Address, Vec, panic_with_error};
+use stellar_swipe_common::{Asset, AssetPair};
 
+ main
+use crate::errors::OracleError;
+use common::{Asset, AssetPair};
+use soroban_sdk::{panic_with_error, Address, Env, Vec};
+
+#[contracttype]
+#[derive(Clone, Debug)]
 pub struct OrderEntry {
     pub price: i128,
     pub amount: i128,
 }
 
+#[contracttype]
+#[derive(Clone, Debug)]
 pub struct OrderBook {
     pub bids: Vec<OrderEntry>,
     pub asks: Vec<OrderEntry>,
@@ -23,8 +32,9 @@ pub fn calculate_spot_price(env: &Env, orderbook: OrderBook) -> Result<i128, Ora
 
     // Spread Check
     let spread = (best_ask - best_bid) * 10000 / best_bid; // Spread in basis points
-    
-    if spread > 2000 { // 20%
+
+    if spread > 2000 {
+        // 20%
         return Err(OracleError::WideSpreadDetected);
     }
 
@@ -37,14 +47,24 @@ pub fn calculate_vwap(orderbook: OrderBook, trade_amount: i128) -> Result<i128, 
     let mut total_cost: i128 = 0;
 
     for ask in orderbook.asks.iter() {
-        let fill_amount = if remaining < ask.amount { remaining } else { ask.amount };
-        
-        total_cost = total_cost.checked_add(
-            fill_amount.checked_mul(ask.price).ok_or(OracleError::Overflow)?
-        ).ok_or(OracleError::Overflow)?;
+        let fill_amount = if remaining < ask.amount {
+            remaining
+        } else {
+            ask.amount
+        };
+
+        total_cost = total_cost
+            .checked_add(
+                fill_amount
+                    .checked_mul(ask.price)
+                    .ok_or(OracleError::Overflow)?,
+            )
+            .ok_or(OracleError::Overflow)?;
 
         remaining -= fill_amount;
-        if remaining == 0 { break; }
+        if remaining == 0 {
+            break;
+        }
     }
 
     if remaining > 0 {

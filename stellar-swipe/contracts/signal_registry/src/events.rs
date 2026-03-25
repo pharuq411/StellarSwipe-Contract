@@ -1,5 +1,9 @@
 use crate::types::Asset;
-use soroban_sdk::{Address, Env, Symbol};
+ feature/cross-chain-sync
+use soroban_sdk::{Address, Env, Symbol, Vec};
+
+use soroban_sdk::{Address, Env, Symbol, String, Vec};
+ main
 
 pub fn emit_admin_transferred(env: &Env, old_admin: Address, new_admin: Address) {
     let topics = (Symbol::new(env, "admin_transferred"), old_admin, new_admin);
@@ -114,7 +118,11 @@ pub fn emit_collaborative_signal_created(env: &Env, signal_id: u64, authors: Vec
 }
 
 pub fn emit_collaborative_signal_approved(env: &Env, signal_id: u64, approver: Address) {
-    let topics = (Symbol::new(env, "collab_signal_approved"), signal_id, approver);
+    let topics = (
+        Symbol::new(env, "collab_signal_approved"),
+        signal_id,
+        approver,
+    );
     env.events().publish(topics, ());
 }
 
@@ -122,3 +130,94 @@ pub fn emit_collaborative_signal_published(env: &Env, signal_id: u64) {
     let topics = (Symbol::new(env, "collab_signal_published"), signal_id);
     env.events().publish(topics, ());
 }
+
+pub fn emit_data_exported(env: &Env, requester: Address, entity_type: u32, record_count: u32) {
+    let topics = (Symbol::new(env, "data_exported"), requester);
+    env.events().publish(topics, (entity_type, record_count));
+}
+
+pub fn emit_combo_created(env: &Env, combo_id: u64, provider: Address, component_count: u32) {
+    let topics = (Symbol::new(env, "combo_created"), combo_id, provider);
+    env.events().publish(topics, component_count);
+}
+
+pub fn emit_combo_executed(env: &Env, combo_id: u64, executor: Address, combined_roi: i128) {
+    let topics = (Symbol::new(env, "combo_executed"), combo_id, executor);
+    env.events().publish(topics, combined_roi);
+}
+
+pub fn emit_combo_cancelled(env: &Env, combo_id: u64, provider: Address) {
+    let topics = (Symbol::new(env, "combo_cancelled"), combo_id, provider);
+    env.events().publish(topics, ());
+}
+
+pub fn emit_signal_updated(env: &Env, signal_id: u64, version: u32, updater: Address) {
+    let topics = (Symbol::new(env, "signal_updated"), signal_id, updater);
+    env.events().publish(topics, version);
+}
+
+pub fn emit_copy_recorded(env: &Env, user: Address, signal_id: u64, version: u32) {
+    let topics = (Symbol::new(env, "copy_recorded"), signal_id, user);
+    env.events().publish(topics, version);
+}
+ feature/cross-chain-sync
+
+pub fn emit_cross_chain_signal_requested(
+    env: &Env,
+    source_chain: soroban_sdk::String,
+    source_id: soroban_sdk::String,
+    provider: Address,
+) {
+    let topics = (Symbol::new(env, "cross_chain_requested"), provider);
+    env.events().publish(topics, (source_chain, source_id));
+}
+
+pub fn emit_cross_chain_signal_imported(
+    env: &Env,
+    source_chain: soroban_sdk::String,
+    source_id: soroban_sdk::String,
+    stellar_id: u64,
+) {
+    let topics = (Symbol::new(env, "cross_chain_imported"), stellar_id);
+    env.events().publish(topics, (source_chain, source_id));
+}
+
+pub fn emit_cross_chain_address_registered(
+    env: &Env,
+    source_chain: soroban_sdk::String,
+    source_address: soroban_sdk::String,
+    stellar_address: Address,
+) {
+    let topics = (Symbol::new(env, "cross_chain_address_registered"), stellar_address);
+    env.events().publish(topics, (source_chain, source_address));
+}
+
+pub fn emit_cross_chain_signal_synced(
+    env: &Env,
+    source_chain: soroban_sdk::String,
+    source_id: soroban_sdk::String,
+    new_status: u32,
+) {
+    let topics = (Symbol::new(env, "cross_chain_synced"), source_chain, source_id);
+    env.events().publish(topics, new_status);
+}
+
+ feature/emergency-pause-circuit-breaker
+
+pub fn emit_emergency_paused(env: &Env, category: String, paused_by: Address, reason: String, auto_unpause_at: Option<u64>) {
+    let topics = (Symbol::new(env, "emergency_paused"), category, paused_by);
+    env.events().publish(topics, (reason, auto_unpause_at));
+}
+
+pub fn emit_emergency_unpaused(env: &Env, category: String, unpaused_by: Address) {
+    let topics = (Symbol::new(env, "emergency_unpaused"), category, unpaused_by);
+    env.events().publish(topics, ());
+}
+
+pub fn emit_circuit_breaker_triggered(env: &Env, category: String, reason: String) {
+    let topics = (Symbol::new(env, "circuit_breaker_triggered"), category);
+    env.events().publish(topics, reason);
+}
+
+ main
+ main
