@@ -7,13 +7,14 @@ pub mod mean_reversion;
 pub mod dca;
  main
 
+pub mod arbitrage;
+pub mod breakout;
+pub mod grid;
 pub mod momentum;
 pub mod pairs_trading;
 pub mod sentiment;
 pub mod stat_arb;
  main
-pub mod arbitrage;
-pub mod grid;
 
 
  feature/mean-reversion-strategy
