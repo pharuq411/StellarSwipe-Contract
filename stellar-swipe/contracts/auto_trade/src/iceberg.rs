@@ -568,7 +568,7 @@ fn cancel_sdex_order(env: &Env, _sdex_order_id: u64) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::{testutils::{Address as _, Ledger as _}, Env};
 
     fn setup_env() -> Env {
         let env = Env::default();

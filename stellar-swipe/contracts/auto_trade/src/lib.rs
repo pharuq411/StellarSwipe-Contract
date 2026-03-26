@@ -17,6 +17,7 @@ mod risk_parity;
 mod sdex;
 mod storage;
 mod strategies;
+mod twap;
 
 use crate::storage::DataKey;
 use advanced_risk::AutoSellResult;

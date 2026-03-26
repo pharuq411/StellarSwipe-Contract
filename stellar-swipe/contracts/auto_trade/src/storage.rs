@@ -56,16 +56,3 @@ pub fn revoke_user_authorization(env: &Env, user: &Address) {
         .persistent()
         .remove(&AuthKey::Authorization(user.clone()));
 }
-#[cfg(test)]
-pub fn authorize_user(env: &Env, user: &Address) {
-    let config = crate::auth::AuthConfig {
-        authorized: true,
-        max_trade_amount: 1_000_000_000_000,
-        expires_at: env.ledger().timestamp() + (30 * 86400),
-        granted_at: env.ledger().timestamp(),
-    };
-    env.storage()
-        .persistent()
-        .set(&crate::auth::AuthKey::Authorization(user.clone()), &config);
-
-}

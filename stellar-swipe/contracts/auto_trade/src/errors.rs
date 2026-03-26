@@ -50,4 +50,10 @@ pub enum AutoTradeError {
     ReferralAlreadySet = 35,
     CircularReferral = 36,
     ReferralLimitExceeded = 37,
+
+    // TWAP
+    InvalidTWAPDuration = 38,
+    TWAPOrderNotFound = 39,
+    NotTWAPOwner = 40,
+    TWAPNotActive = 41,
 }

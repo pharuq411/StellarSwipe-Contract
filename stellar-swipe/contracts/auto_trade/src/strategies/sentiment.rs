@@ -817,7 +817,7 @@ fn sqrt(n: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::{testutils::{Address as _, Ledger as _}, Env};
 
     fn setup_env() -> Env {
         let env = Env::default();
@@ -834,12 +834,8 @@ mod tests {
 
     fn create_test_sources(env: &Env) -> Vec<SentimentSource> {
         let mut sources = Vec::new(env);
-        sources.push_back(SentimentSource::Twitter {
-            handle: String::from_str(env, "stellar"),
-        });
-        sources.push_back(SentimentSource::OnChainMetrics {
-            metric_type: MetricType::ActiveAddresses,
-        });
+        sources.push_back(SentimentSource::Twitter(String::from_str(env, "stellar")));
+        sources.push_back(SentimentSource::OnChainMetrics(MetricType::ActiveAddresses));
         sources.push_back(SentimentSource::SignalRationale);
         sources
     }

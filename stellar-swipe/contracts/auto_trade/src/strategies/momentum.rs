@@ -476,12 +476,10 @@ pub fn rank_assets_by_momentum(
 ) -> Result<Vec<(AssetPair, i128)>, AutoTradeError> {
     let mut ranked = Vec::new(env);
 
-    let keys = strategy.asset_pairs.keys();
-    for i in 0..keys.len() {
-        if let Some(idx) = keys.get(i) {
-            if let Some(asset_pair) = strategy.asset_pairs.get(idx) {
-                if let Some(prices) = prices_map.get(asset_pair.base) {
-                    let indicators = calculate_momentum_indicators(env, &prices, strategy.momentum_period_days)?;
+    for i in 0..strategy.asset_pairs.len() {
+        if let Some(asset_pair) = strategy.asset_pairs.get(i) {
+            if let Some(prices) = prices_map.get(asset_pair.base) {
+                let indicators = calculate_momentum_indicators(env, &prices, strategy.momentum_period_days)?;
 
                     // Composite score: ROC + trend strength component
                     let score = indicators.rate_of_change
@@ -491,7 +489,6 @@ pub fn rank_assets_by_momentum(
                 }
             }
         }
-    }
 
     // Sort by score descending (bubble sort for Soroban compatibility)
     let len = ranked.len();
@@ -530,7 +527,7 @@ pub fn rebalance_by_momentum_rank(
 
     // Collect top N assets
     let mut top_assets = Vec::new(env);
-    for i in 0..top_n.min(ranked_assets.len()) {
+    for i in 0..(top_n.min(ranked_assets.len() as usize)) {
         if let Some((pair, _)) = ranked_assets.get(i as u32) {
             top_assets.push_back(pair);
         }
