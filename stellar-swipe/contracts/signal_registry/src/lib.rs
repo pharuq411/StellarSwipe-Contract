@@ -15,64 +15,43 @@ mod leaderboard;
 mod ml_scoring;
 mod performance;
 mod query;
- feature/cross-chain-sync
 mod scheduling;
-
- feature/emergency-pause-circuit-breaker
-mod scheduling;
-
- main
 mod reputation;
 mod test_reputation;
- main
 mod social;
 mod stake;
 mod submission;
 mod templates;
 mod types;
-mod combos;
 mod cross_chain;
-mod test_combos;
-mod types;
 mod versioning;
 
 use admin::{
- feature/emergency-pause-circuit-breaker
     get_admin, get_admin_config, init_admin, is_trading_paused, require_not_paused_legacy as require_not_paused,
     AdminConfig,
-
-    get_admin, get_admin_config, init_admin, is_trading_paused, require_not_paused, AdminConfig,
-    PauseInfo,
- main
 };
-use stellar_swipe_common::emergency::{PauseState, CAT_SIGNALS, CAT_TRADING, CAT_STAKES, CAT_ALL};
+use stellar_swipe_common::emergency::{PauseState, CAT_ALL, CAT_SIGNALS, CAT_STAKES, CAT_TRADING};
 use categories::{RiskLevel, SignalCategory};
-use errors::{AdminError, TemplateError, ContestError, VersioningError, CrossChainError};
-pub use leaderboard::{get_leaderboard as get_leaderboard_internal, LeaderboardMetric, ProviderLeaderboard};
 use combos::{
     cancel_combo, create_combo_signal, execute_combo_signal, get_combo, get_combo_executions_pub,
     get_combo_performance, ComboExecution, ComboPerformanceSummary, ComboSignal, ComboType,
     ComponentExecution, ComponentSignal,
 };
 use contests::{Contest, ContestEntry, ContestMetric, ContestStatus};
-use errors::ComboError;
-use errors::{AdminError, ContestError, TemplateError, VersioningError};
+use errors::{
+    AdminError, ComboError, ContestError, CrossChainError, TemplateError, VersioningError,
+};
 pub use leaderboard::{
     get_leaderboard as get_leaderboard_internal, LeaderboardMetric, ProviderLeaderboard,
 };
-pub use ml_scoring::{
-    MLModel, SignalFeatures, SignalScore,
-};
+pub use ml_scoring::{MLModel, SignalFeatures, SignalScore};
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, Map, String, Vec};
 use stellar_swipe_common::{validate_asset_pair as validate_asset_pair_common, AssetPairError};
 use templates::{SignalTemplate, DEFAULT_TEMPLATE_EXPIRY_HOURS};
 use types::{
-    Asset, FeeBreakdown, ImportResultView, ProviderPerformance, Signal, SignalAction,
-    SignalPerformanceView, SignalStatus, SignalSummary, SortOption, TradeExecution,
-    SignalData, RecurrencePattern, CrossChainSignal, SyncStatus, AddressMapping,
-    Asset, FeeBreakdown, ImportResultView, ProviderPerformance, RecurrencePattern, Signal,
-    SignalAction, SignalData, SignalPerformanceView, SignalStatus, SignalSummary, SortOption,
-    TradeExecution,
+    AddressMapping, Asset, CrossChainSignal, FeeBreakdown, ImportResultView, ProviderPerformance,
+    RecurrencePattern, Signal, SignalAction, SignalData, SignalPerformanceView, SignalStatus,
+    SignalSummary, SortOption, SyncStatus, TradeExecution,
 };
 use reputation::{calculate_trust_score, get_trust_score, update_trust_score, update_median_values, TrustScoreDetails, TrustScoreTier};
 use versioning::{SignalVersion, CopyRecord};
@@ -854,7 +833,8 @@ impl SignalRegistry {
 
     /// Follow a provider. Idempotent if already following.
     pub fn follow_provider(env: Env, user: Address, provider: Address) -> Result<(), AdminError> {
-        social::follow_provider(&env, user, provider).map_err(|_| AdminError::CannotFollowSelf)?;
+        social::follow_provider(&env, user, provider.clone())
+            .map_err(|_| AdminError::CannotFollowSelf)?;
 
         // Update trust score when follower count changes
         Self::update_provider_trust_score(env, provider);
@@ -864,7 +844,8 @@ impl SignalRegistry {
 
     /// Unfollow a provider. No error if not following.
     pub fn unfollow_provider(env: Env, user: Address, provider: Address) -> Result<(), AdminError> {
-        social::unfollow_provider(&env, user, provider).map_err(|_| AdminError::Unauthorized)?;
+        social::unfollow_provider(&env, user, provider.clone())
+            .map_err(|_| AdminError::Unauthorized)?;
 
         // Update trust score when follower count changes
         Self::update_provider_trust_score(env, provider);
@@ -1236,30 +1217,10 @@ impl SignalRegistry {
     ) -> Result<u64, ComboError> {
         provider.require_auth();
 
-      feature/cross-chain-sync
         let count = components.len();
-        let combo_id =
-            create_combo_signal(&env, &provider, name, components, combo_type)?;
-
-        events::emit_combo_created(
-            &env,
-            combo_id,
-            provider,
-            count,
-
- feature/emergency-pause-circuit-breaker
-        let combo_id =
-            create_combo_signal(&env, &provider, name, components.clone(), combo_type)?;
-
         let combo_id = create_combo_signal(&env, &provider, name, components, combo_type)?;
- main
 
-        events::emit_combo_created(
-            &env, combo_id, provider,
-            // component count already validated inside create_combo_signal
-            components.len(),
- main
-        );
+        events::emit_combo_created(&env, combo_id, provider, count);
 
         Ok(combo_id)
     }
@@ -1333,22 +1294,12 @@ impl SignalRegistry {
         prize_pool: i128,
     ) -> Result<u64, ContestError> {
         admin.require_auth();
-      feature/cross-chain-sync
-        if is_trading_paused(&env) {
-            return Err(ContestError::ContestNotFound);
-        }
-        contests::create_contest(&env, name, start_time, end_time, metric, min_signals, prize_pool)
 
- feature/emergency-pause-circuit-breaker
         require_not_paused(&env).map_err(|e| match e {
             AdminError::TradingPaused => ContestError::TradingPaused,
             AdminError::CircuitBreakerTriggered => ContestError::CircuitBreakerTriggered,
             _ => ContestError::ContestNotFound,
         })?;
-        contests::create_contest(&env, name, start_time, end_time, metric, min_signals, prize_pool)
-
- main
-        require_not_paused(&env)?;
         contests::create_contest(
             &env,
             name,
@@ -1358,7 +1309,6 @@ impl SignalRegistry {
             min_signals,
             prize_pool,
         )
- main
     }
 
     /// Finalize a contest and distribute prizes
@@ -1616,6 +1566,9 @@ impl SignalRegistry {
         );
 
         Ok(())
+    }
+
+    /* =========================
        TRUST SCORE FUNCTIONS
     ========================== */
 
@@ -1740,14 +1693,13 @@ impl SignalRegistry {
     }
 }
 
-/*mod test;
-mod test_analytics;
-mod test_categories;
-mod test_analytics;
-mod test_import;
-mod test_performance;
-mod test_collaboration; */
+#[cfg(test)]
+mod test_combos;
+#[cfg(test)]
 mod test_contests;
+#[cfg(test)]
 mod test_scheduling;
+#[cfg(test)]
 mod test_versioning;
+#[cfg(test)]
 mod test_emergency;

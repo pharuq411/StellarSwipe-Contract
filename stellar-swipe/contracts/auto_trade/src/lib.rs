@@ -15,6 +15,7 @@ mod oracle;
 mod portfolio;
 mod portfolio_insurance;
 mod positions;
+mod rate_limit;
 mod referral;
 mod risk;
 mod risk_parity;
@@ -662,11 +663,6 @@ impl AutoTradeContract {
         auth::get_auth_config(&env, &user)
     }
 
- feature/mean-reversion-strategy
-feature/mean-reversion-strategy
-
- feature/dca-strategy
- main
     // ── DCA ──────────────────────────────────────────────────────────────────
 
     pub fn create_dca(
@@ -726,7 +722,6 @@ feature/mean-reversion-strategy
         strategy_id: u64,
     ) -> Result<strategies::dca::DCAPerformance, AutoTradeError> {
         strategies::dca::analyze_dca_performance(&env, strategy_id)
- feature/mean-reversion-strategy
     }
 
     // ── Mean Reversion ────────────────────────────────────────────────────────
@@ -1124,7 +1119,6 @@ feature/mean-reversion-strategy
             asset_b,
             lookback_days,
         )
- main
     }
 
     // ── Correlation-Based Risk Management (Issue #correlation) ───────────────
@@ -1250,6 +1244,7 @@ feature/mean-reversion-strategy
     }
 }
 
+#[cfg(test)]
 mod test;
 mod test_oracle_whitelist;
 
