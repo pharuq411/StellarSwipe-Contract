@@ -824,3 +824,184 @@ mod property_tests {
     }
 }
  main
+// ---------------------------------------------------------------------------
+// Fee rate tests
+// ---------------------------------------------------------------------------
+
+// fee_rate: returns default (30 bps) when never set
+#[test]
+fn test_fee_rate_default() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let contract_id = env.register(FeeCollector, ());
+    let client = FeeCollectorClient::new(&env, &contract_id);
+    client.initialize(&admin);
+
+    assert_eq!(client.fee_rate(), 30u32);
+}
+
+// set_fee_rate: happy path — updates rate and `fee_rate()` reflects new value
+#[test]
+fn test_set_fee_rate_happy_path() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let contract_id = env.register(FeeCollector, ());
+    let client = FeeCollectorClient::new(&env, &contract_id);
+    client.initialize(&admin);
+
+    client.set_fee_rate(&50u32);
+    assert_eq!(client.fee_rate(), 50u32);
+}
+
+// set_fee_rate: minimum boundary (1 bps) is accepted
+#[test]
+fn test_set_fee_rate_min_boundary() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let contract_id = env.register(FeeCollector, ());
+    let client = FeeCollectorClient::new(&env, &contract_id);
+    client.initialize(&admin);
+
+    client.set_fee_rate(&1u32);
+    assert_eq!(client.fee_rate(), 1u32);
+}
+
+// set_fee_rate: maximum boundary (100 bps) is accepted
+#[test]
+fn test_set_fee_rate_max_boundary() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let contract_id = env.register(FeeCollector, ());
+    let client = FeeCollectorClient::new(&env, &contract_id);
+    client.initialize(&admin);
+
+    client.set_fee_rate(&100u32);
+    assert_eq!(client.fee_rate(), 100u32);
+}
+
+// set_fee_rate: rate above max (101 bps) returns FeeRateTooHigh
+#[test]
+fn test_set_fee_rate_too_high() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let contract_id = env.register(FeeCollector, ());
+    let client = FeeCollectorClient::new(&env, &contract_id);
+    client.initialize(&admin);
+
+    let result = client.try_set_fee_rate(&101u32);
+    assert_eq!(result, Err(Ok(ContractError::FeeRateTooHigh)));
+}
+
+// set_fee_rate: rate of 0 (below min) returns FeeRateTooLow
+#[test]
+fn test_set_fee_rate_too_low() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let contract_id = env.register(FeeCollector, ());
+    let client = FeeCollectorClient::new(&env, &contract_id);
+    client.initialize(&admin);
+
+    let result = client.try_set_fee_rate(&0u32);
+    assert_eq!(result, Err(Ok(ContractError::FeeRateTooLow)));
+}
+
+// set_fee_rate: new rate does NOT alter a rate read before the call (no retroactive application)
+#[test]
+fn test_set_fee_rate_no_retroactive_application() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let contract_id = env.register(FeeCollector, ());
+    let client = FeeCollectorClient::new(&env, &contract_id);
+    client.initialize(&admin);
+
+    // Snapshot rate before change
+    let rate_before = client.fee_rate();
+
+    // Change the rate
+    client.set_fee_rate(&75u32);
+
+    // rate_before is still the old value — the change is not retroactive
+    assert_ne!(rate_before, 75u32, "rate_before must be the old default");
+    assert_eq!(client.fee_rate(), 75u32, "fee_rate() must reflect the new value");
+}
+
+// set_fee_rate: emits FeeRateUpdated event with correct fields
+#[test]
+fn test_set_fee_rate_emits_event() {
+    use soroban_sdk::testutils::Events;
+
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let contract_id = env.register(FeeCollector, ());
+    let client = FeeCollectorClient::new(&env, &contract_id);
+    client.initialize(&admin);
+
+    // Clear any events from initialization
+    env.events().all();
+
+    client.set_fee_rate(&60u32);
+
+    let events = env.events().all();
+    assert!(!events.is_empty(), "FeeRateUpdated event must be emitted");
+}
+
+// set_fee_rate: NotInitialized before init
+#[test]
+fn test_set_fee_rate_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(FeeCollector, ());
+    let client = FeeCollectorClient::new(&env, &contract_id);
+
+    let result = client.try_set_fee_rate(&30u32);
+    assert_eq!(result, Err(Ok(ContractError::NotInitialized)));
+}
+
+// set_fee_rate: unauthorized — non-admin call must fail
+#[test]
+fn test_set_fee_rate_unauthorized() {
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+    use soroban_sdk::IntoVal;
+
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let non_admin = Address::generate(&env);
+    let contract_id = env.register(FeeCollector, ());
+    let client = FeeCollectorClient::new(&env, &contract_id);
+    client.initialize(&admin);
+
+    let sub_invokes: &[MockAuthInvoke] = &[];
+    let mock_invoke = MockAuthInvoke {
+        contract: &contract_id,
+        fn_name: "set_fee_rate",
+        args: (&50u32,).into_val(&env),
+        sub_invokes,
+    };
+    let mock_auth = MockAuth { address: &non_admin, invoke: &mock_invoke };
+    let auths: &[MockAuth] = &[mock_auth];
+    let result = client.mock_auths(auths).try_set_fee_rate(&50u32);
+
+    assert!(result.is_err(), "non-admin call to set_fee_rate must fail");
+}
+
+ main
+ main

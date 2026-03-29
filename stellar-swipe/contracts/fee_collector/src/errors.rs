@@ -12,4 +12,6 @@ pub enum ContractError {
     WithdrawalNotQueued         = 6,
     TimelockNotElapsed          = 7,
     ArithmeticOverflow          = 8,
+    FeeRateTooHigh              = 9,
+    FeeRateTooLow               = 10,
 }

@@ -134,13 +134,14 @@ mod errors;
 pub use errors::ContractError;
 
 mod events;
-pub use events::{TreasuryWithdrawal, WithdrawalQueued};
+pub use events::{FeeRateUpdated, TreasuryWithdrawal, WithdrawalQueued};
 
 mod storage;
 pub use storage::{
-    get_admin, get_queued_withdrawal, get_treasury_balance, is_initialized, remove_queued_withdrawal,
-    set_admin, set_initialized, set_queued_withdrawal, set_treasury_balance, QueuedWithdrawal,
-    StorageKey,
+    get_admin, get_fee_rate, get_queued_withdrawal, get_treasury_balance, is_initialized,
+    remove_queued_withdrawal, set_admin, set_fee_rate as set_fee_rate_storage, set_initialized,
+    set_queued_withdrawal, set_treasury_balance, QueuedWithdrawal, StorageKey,
+    MAX_FEE_RATE_BPS, MIN_FEE_RATE_BPS,
 };
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env};
@@ -254,6 +255,44 @@ impl FeeCollector {
             token: token.clone(),
             amount,
             remaining_balance: new_balance,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Returns the current fee rate in basis points.
+    pub fn fee_rate(env: Env) -> Result<u32, ContractError> {
+        if !is_initialized(&env) {
+            return Err(ContractError::NotInitialized);
+        }
+        Ok(get_fee_rate(&env))
+    }
+
+    /// Admin-only: update the fee rate (in basis points).
+    /// Validates: MIN_FEE_RATE_BPS <= new_rate_bps <= MAX_FEE_RATE_BPS.
+    /// Change takes effect on the next trade — no retroactive application.
+    pub fn set_fee_rate(env: Env, new_rate_bps: u32) -> Result<(), ContractError> {
+        if !is_initialized(&env) {
+            return Err(ContractError::NotInitialized);
+        }
+        let admin = get_admin(&env);
+        admin.require_auth();
+
+        if new_rate_bps > MAX_FEE_RATE_BPS {
+            return Err(ContractError::FeeRateTooHigh);
+        }
+        if new_rate_bps < MIN_FEE_RATE_BPS {
+            return Err(ContractError::FeeRateTooLow);
+        }
+
+        let old_rate = get_fee_rate(&env);
+        set_fee_rate_storage(&env, new_rate_bps);
+
+        FeeRateUpdated {
+            old_rate,
+            new_rate: new_rate_bps,
+            updated_by: admin,
         }
         .publish(&env);
 

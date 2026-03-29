@@ -1,11 +1,16 @@
 use soroban_sdk::{contracttype, Address, Env};
 
+pub const MAX_FEE_RATE_BPS: u32 = 100; // 1%
+pub const MIN_FEE_RATE_BPS: u32 = 1;   // 0.01%
+pub const DEFAULT_FEE_RATE_BPS: u32 = 30; // 0.3%
+
 #[contracttype]
 pub enum StorageKey {
     Admin,
     Initialized,
     TreasuryBalance(Address), // persistent, per-token
     QueuedWithdrawal,         // instance, single-slot
+    FeeRate,                  // instance, current fee rate in bps
 }
 
 #[contracttype]
@@ -74,6 +79,21 @@ pub fn set_queued_withdrawal(env: &Env, withdrawal: &QueuedWithdrawal) {
     env.storage()
         .instance()
         .set(&StorageKey::QueuedWithdrawal, withdrawal);
+}
+
+// --- Fee Rate ---
+
+pub fn get_fee_rate(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&StorageKey::FeeRate)
+        .unwrap_or(DEFAULT_FEE_RATE_BPS)
+}
+
+pub fn set_fee_rate(env: &Env, rate: u32) {
+    env.storage()
+        .instance()
+        .set(&StorageKey::FeeRate, &rate);
 }
 
 pub fn remove_queued_withdrawal(env: &Env) {
