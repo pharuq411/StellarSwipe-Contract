@@ -1,6 +1,7 @@
 #![no_std]
 
 mod errors;
+pub mod triggers;
  feature/copy-trade-balance-check
 pub mod risk_gates;
 
@@ -26,6 +27,16 @@ pub enum StorageKey {
     UserPortfolio,
     /// When set to `true`, this user bypasses [`risk_gates::MAX_POSITIONS_PER_USER`].
     PositionLimitExempt(Address),
+ feature/take-profit-trigger
+    /// Oracle contract used by stop-loss/take-profit triggers (`get_price(asset_pair) -> i128`).
+    Oracle,
+    /// Portfolio contract used by stop-loss/take-profit close calls (`close_position(user, trade_id, pnl)`).
+
+    /// Oracle contract used by stop-loss trigger (`get_price(asset_pair) -> i128`).
+    Oracle,
+    /// Portfolio contract used by stop-loss trigger (`close_position(user, trade_id, pnl)`).
+ main
+    StopLossPortfolio,
  feature/copy-trade-balance-check
     /// Overrides default estimated fee used in balance checks (`None` = use default constant).
     CopyTradeEstimatedFee,
@@ -37,6 +48,9 @@ pub enum StorageKey {
 
 /// Symbol invoked on the portfolio after a successful limit check (test / integration hook).
 pub const RECORD_COPY_POSITION_FN: &str = "record_copy_position";
+
+/// Temporary-storage key for the reentrancy lock on `execute_copy_trade`.
+const EXECUTION_LOCK: &str = "ExecLock";
 
  feature/copy-trade-balance-check
 #[contract]
@@ -161,6 +175,89 @@ main
         env.storage().instance().get(&key).unwrap_or(false)
     }
 
+ feature/take-profit-trigger
+    // ── Stop-loss / take-profit configuration ─────────────────────────────────
+
+    /// Set the oracle contract used by stop-loss/take-profit checks (admin only).
+
+    // ── Stop-loss configuration ───────────────────────────────────────────────
+
+    /// Set the oracle contract used by stop-loss checks (admin only).
+ main
+    pub fn set_oracle(env: Env, oracle: Address) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .expect("not initialized");
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, triggers::ORACLE_KEY), &oracle);
+    }
+
+ feature/take-profit-trigger
+    /// Set the portfolio contract used by stop-loss/take-profit close calls (admin only).
+
+    /// Set the portfolio contract used by stop-loss close calls (admin only).
+ main
+    pub fn set_stop_loss_portfolio(env: Env, portfolio: Address) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .expect("not initialized");
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, triggers::PORTFOLIO_KEY), &portfolio);
+    }
+
+ feature/take-profit-trigger
+    /// Register a stop-loss price for `(user, trade_id)`.
+
+    /// Register a stop-loss price for `(user, trade_id)`.  Callable by the user or a keeper.
+ main
+    pub fn set_stop_loss_price(env: Env, user: Address, trade_id: u64, stop_loss_price: i128) {
+        user.require_auth();
+        triggers::set_stop_loss(&env, &user, trade_id, stop_loss_price);
+    }
+
+ feature/take-profit-trigger
+    /// Check oracle price and trigger stop-loss if breached. Returns `true` when triggered.
+
+    /// Check oracle price and trigger stop-loss if breached.  Returns `true` when triggered.
+    /// Callable by an off-chain keeper or on-chain oracle callback.
+ main
+    pub fn check_and_trigger_stop_loss(
+        env: Env,
+        user: Address,
+        trade_id: u64,
+        asset_pair: u32,
+    ) -> Result<bool, ContractError> {
+        triggers::check_and_trigger_stop_loss(&env, user, trade_id, asset_pair)
+    }
+
+ feature/take-profit-trigger
+    /// Register a take-profit price for `(user, trade_id)`.
+    pub fn set_take_profit_price(env: Env, user: Address, trade_id: u64, take_profit_price: i128) {
+        user.require_auth();
+        triggers::set_take_profit(&env, &user, trade_id, take_profit_price);
+    }
+
+    /// Check oracle price and trigger take-profit if breached. Returns `true` when triggered.
+    /// Stop-loss takes priority if both would trigger simultaneously.
+    pub fn check_and_trigger_take_profit(
+        env: Env,
+        user: Address,
+        trade_id: u64,
+        asset_pair: u32,
+    ) -> Result<bool, ContractError> {
+        triggers::check_and_trigger_take_profit(&env, user, trade_id, asset_pair)
+    }
+
+
+ main
 feature/copy-trade-balance-check
     /// Structured shortfall after the last `InsufficientBalance` from [`Self::execute_copy_trade`].
     pub fn get_insufficient_balance_detail(
@@ -190,6 +287,12 @@ feature/copy-trade-balance-check
         user.require_auth();
 
 main
+        let lock_key = Symbol::new(&env, EXECUTION_LOCK);
+        if env.storage().temporary().get::<_, bool>(&lock_key).unwrap_or(false) {
+            return Err(ContractError::ReentrancyDetected);
+        }
+        env.storage().temporary().set(&lock_key, &true);
+
         let portfolio: Address = env
             .storage()
             .instance()
@@ -223,6 +326,7 @@ main
         args.push_back(user.into_val(&env));
         env.invoke_contract::<()>(&portfolio, &sym, args);
 
+        env.storage().temporary().remove(&Symbol::new(&env, EXECUTION_LOCK));
         Ok(())
 feature/copy-trade-balance-check
 

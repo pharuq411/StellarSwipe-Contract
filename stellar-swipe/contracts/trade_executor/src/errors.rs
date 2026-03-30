@@ -32,6 +32,9 @@ feature/position-limit-copy-trade
 main
  main
     ReentrancyDetected = 5,
+ feature/cancel-copy-trade
     Unauthorized = 6,
     TradeNotFound = 7,
+
+ main
 }
