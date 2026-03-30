@@ -1,6 +1,29 @@
 use crate::types::Asset;
 use soroban_sdk::{contracttype, Address, Env, String, Symbol, Vec};
 
+pub fn emit_admin_transfer_proposed(
+    env: &Env,
+    current_admin: Address,
+    pending_admin: Address,
+    expires_at_ledger: u32,
+) {
+    let topics = (
+        Symbol::new(env, "admin_transfer_proposed"),
+        current_admin,
+        pending_admin,
+    );
+    env.events().publish(topics, expires_at_ledger);
+}
+
+pub fn emit_admin_transfer_completed(env: &Env, old_admin: Address, new_admin: Address) {
+    let topics = (
+        Symbol::new(env, "admin_transfer_completed"),
+        old_admin,
+        new_admin,
+    );
+    env.events().publish(topics, ());
+}
+
 pub fn emit_admin_transferred(env: &Env, old_admin: Address, new_admin: Address) {
     let topics = (Symbol::new(env, "admin_transferred"), old_admin, new_admin);
     env.events().publish(topics, ());
@@ -64,14 +87,16 @@ pub struct SignalAdoptedEvent {
     pub new_count: u32,
 }
 
-pub fn emit_signal_adopted(
-    env: &Env,
-    signal_id: u64,
-    adopter: Address,
-    new_count: u32,
-) {
+pub fn emit_signal_adopted(env: &Env, signal_id: u64, adopter: Address, new_count: u32) {
     let topics = (Symbol::new(env, "signal_adopted"), signal_id);
-    env.events().publish(topics, SignalAdoptedEvent { signal_id, adopter, new_count });
+    env.events().publish(
+        topics,
+        SignalAdoptedEvent {
+            signal_id,
+            adopter,
+            new_count,
+        },
+    );
 }
 
 pub fn emit_signal_expired(env: &Env, signal_id: u64, provider: Address, expired_at_ledger: u64) {
@@ -188,7 +213,11 @@ pub fn emit_signal_edited(
     rationale_hash: String,
     confidence: u32,
 ) {
-    let topics = (Symbol::new(env, "signal_edited"), signal_id, provider.clone());
+    let topics = (
+        Symbol::new(env, "signal_edited"),
+        signal_id,
+        provider.clone(),
+    );
     env.events().publish(
         topics,
         SignalEditedEvent {
@@ -232,7 +261,10 @@ pub fn emit_cross_chain_address_registered(
     source_address: soroban_sdk::String,
     stellar_address: Address,
 ) {
-    let topics = (Symbol::new(env, "cross_chain_address_registered"), stellar_address);
+    let topics = (
+        Symbol::new(env, "cross_chain_address_registered"),
+        stellar_address,
+    );
     env.events().publish(topics, (source_chain, source_address));
 }
 
@@ -242,7 +274,11 @@ pub fn emit_cross_chain_signal_synced(
     source_id: soroban_sdk::String,
     new_status: u32,
 ) {
-    let topics = (Symbol::new(env, "cross_chain_synced"), source_chain, source_id);
+    let topics = (
+        Symbol::new(env, "cross_chain_synced"),
+        source_chain,
+        source_id,
+    );
     env.events().publish(topics, new_status);
 }
 
@@ -258,7 +294,11 @@ pub fn emit_emergency_paused(
 }
 
 pub fn emit_emergency_unpaused(env: &Env, category: String, unpaused_by: Address) {
-    let topics = (Symbol::new(env, "emergency_unpaused"), category, unpaused_by);
+    let topics = (
+        Symbol::new(env, "emergency_unpaused"),
+        category,
+        unpaused_by,
+    );
     env.events().publish(topics, ());
 }
 

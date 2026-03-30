@@ -23,6 +23,8 @@ pub enum AdminError {
     ScheduleNotFound = 19,
     NotScheduleOwner = 20,
     CircuitBreakerTriggered = 21,
+    NoPendingAdminTransfer = 22,
+    AdminTransferExpired = 23,
 }
 
 #[contracterror]
@@ -187,4 +189,3 @@ pub enum SignalOutcomeError {
     SignalNotClosed = 1152,
     OutcomeAlreadyRecorded = 1153,
 }
-

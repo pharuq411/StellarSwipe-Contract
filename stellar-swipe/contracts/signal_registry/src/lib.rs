@@ -6,6 +6,7 @@ mod categories;
 mod collaboration;
 mod combos;
 mod contests;
+mod cross_chain;
 mod errors;
 mod events;
 mod expiry;
@@ -15,22 +16,21 @@ mod leaderboard;
 mod ml_scoring;
 mod performance;
 mod query;
-mod scheduling;
 mod reputation;
-mod test_reputation;
+mod scheduling;
 mod social;
 mod stake;
 mod submission;
 mod templates;
+mod test_reputation;
 mod types;
-mod cross_chain;
 mod versioning;
 
 use admin::{
-    get_admin, get_admin_config, init_admin, is_trading_paused, require_not_paused_legacy as require_not_paused,
-    AdminConfig,
+    get_admin, get_admin_config, init_admin, is_trading_paused,
+    require_not_paused_legacy as require_not_paused, AdminConfig,
 };
-use stellar_swipe_common::emergency::{PauseState, CAT_SIGNALS, CAT_TRADING, CAT_STAKES, CAT_ALL};
+use stellar_swipe_common::emergency::{PauseState, CAT_ALL, CAT_SIGNALS, CAT_STAKES, CAT_TRADING};
 use stellar_swipe_common::rate_limit::{self as rl, ActionType as RLAction, RateLimitConfig};
 
 use categories::{RiskLevel, SignalCategory};
@@ -48,7 +48,12 @@ pub use leaderboard::{
     get_leaderboard as get_leaderboard_internal, LeaderboardMetric, ProviderLeaderboard,
 };
 pub use ml_scoring::{MLModel, SignalFeatures, SignalScore};
+use reputation::{
+    calculate_trust_score, get_trust_score, update_median_values, update_trust_score,
+    TrustScoreDetails, TrustScoreTier,
+};
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, Map, String, Vec};
+use stellar_swipe_common::{health_uninitialized, placeholder_admin, HealthStatus};
 use stellar_swipe_common::{validate_asset_pair as validate_asset_pair_common, AssetPairError};
 use templates::{SignalTemplate, DEFAULT_TEMPLATE_EXPIRY_HOURS};
 use types::{
@@ -56,9 +61,7 @@ use types::{
     RecurrencePattern, Signal, SignalAction, SignalData, SignalEditInput, SignalOutcome,
     SignalPerformanceView, SignalStatus, SignalSummary, SortOption, SyncStatus, TradeExecution,
 };
-use stellar_swipe_common::{health_uninitialized, placeholder_admin, HealthStatus};
-use reputation::{calculate_trust_score, get_trust_score, update_trust_score, update_median_values, TrustScoreDetails, TrustScoreTier};
-use versioning::{SignalVersion, CopyRecord};
+use versioning::{CopyRecord, SignalVersion};
 
 const MAX_EXPIRY_SECONDS: u64 = 30 * 24 * 60 * 60;
 
@@ -82,7 +85,7 @@ pub enum StorageKey {
     Combos,
     ComboExecutions(u64),
     CrossChainSignals(String, String), // (source_chain, source_signal_id)
-    AddressMappings(String, String),    // (source_chain, source_address)
+    AddressMappings(String, String),   // (source_chain, source_address)
     /// Per-category index of active signal IDs for efficient filtering (Issue #171)
     ActiveSignalsByCategory,
     /// Nonce check for adoption increments to prevent double-counting (Issue #169)
@@ -106,10 +109,16 @@ impl SignalRegistry {
     }
 
     /// Register the TradeExecutor contract address (admin only). Required before `increment_adoption`.
-    pub fn set_trade_executor(env: Env, caller: Address, executor: Address) -> Result<(), AdminError> {
+    pub fn set_trade_executor(
+        env: Env,
+        caller: Address,
+        executor: Address,
+    ) -> Result<(), AdminError> {
         admin::require_admin(&env, &caller)?;
         caller.require_auth();
-        env.storage().instance().set(&StorageKey::TradeExecutor, &executor);
+        env.storage()
+            .instance()
+            .set(&StorageKey::TradeExecutor, &executor);
         Ok(())
     }
 
@@ -188,7 +197,14 @@ impl SignalRegistry {
     ) -> Result<(), AdminError> {
         admin::require_admin(&env, &caller)?;
         caller.require_auth();
-        rl::set_config(&env, action, RateLimitConfig { window_secs, max_actions });
+        rl::set_config(
+            &env,
+            action,
+            RateLimitConfig {
+                window_secs,
+                max_actions,
+            },
+        );
         Ok(())
     }
 
@@ -235,8 +251,20 @@ impl SignalRegistry {
         admin::get_pause_states(&env)
     }
 
-    pub fn transfer_admin(env: Env, caller: Address, new_admin: Address) -> Result<(), AdminError> {
-        admin::transfer_admin(&env, &caller, new_admin)
+    pub fn propose_admin_transfer(
+        env: Env,
+        caller: Address,
+        new_admin: Address,
+    ) -> Result<(), AdminError> {
+        admin::propose_admin_transfer(&env, &caller, new_admin)
+    }
+
+    pub fn accept_admin_transfer(env: Env, caller: Address) -> Result<(), AdminError> {
+        admin::accept_admin_transfer(&env, &caller)
+    }
+
+    pub fn cancel_admin_transfer(env: Env, caller: Address) -> Result<(), AdminError> {
+        admin::cancel_admin_transfer(&env, &caller)
     }
 
     pub fn set_guardian(env: Env, caller: Address, guardian: Address) -> Result<(), AdminError> {
@@ -422,22 +450,22 @@ impl SignalRegistry {
             .unwrap_or(Map::new(env))
     }
 
-fn save_signals_map(env: &Env, map: &Map<u64, Signal>) {
+    fn save_signals_map(env: &Env, map: &Map<u64, Signal>) {
         env.storage().instance().set(&StorageKey::Signals, map);
     }
 
-fn get_category_index_map(env: &Env) -> Map<SignalCategory, Vec<u64>> {
-    env.storage()
-        .instance()
-        .get(&StorageKey::ActiveSignalsByCategory)
-        .unwrap_or(Map::new(env))
-}
+    fn get_category_index_map(env: &Env) -> Map<SignalCategory, Vec<u64>> {
+        env.storage()
+            .instance()
+            .get(&StorageKey::ActiveSignalsByCategory)
+            .unwrap_or(Map::new(env))
+    }
 
-fn save_category_index_map(env: &Env, map: &Map<SignalCategory, Vec<u64>>) {
-    env.storage()
-        .instance()
-        .set(&StorageKey::ActiveSignalsByCategory, map);
-}
+    fn save_category_index_map(env: &Env, map: &Map<SignalCategory, Vec<u64>>) {
+        env.storage()
+            .instance()
+            .set(&StorageKey::ActiveSignalsByCategory, map);
+    }
 
     fn get_provider_stakes_map(env: &Env) -> Map<Address, stake::StakeInfo> {
         env.storage()
@@ -602,7 +630,6 @@ fn save_category_index_map(env: &Env, map: &Map<SignalCategory, Vec<u64>>) {
         signals.get(signal_id)
     }
 
-
     /// Edit price, rationale hash, or confidence within 60s of `submitted_at` (Issue #168).
     pub fn update_signal(
         env: Env,
@@ -696,16 +723,14 @@ fn save_category_index_map(env: &Env, map: &Map<SignalCategory, Vec<u64>>) {
 
         let provider = signal.provider.clone();
         let rep_key = StorageKey::ProviderReputationScore(provider.clone());
-        let old_score: u32 = env
-            .storage()
-            .instance()
-            .get(&rep_key)
-            .unwrap_or(50);
+        let old_score: u32 = env.storage().instance().get(&rep_key).unwrap_or(50);
         let new_score = reputation::next_reputation_score(old_score, &outcome);
         env.storage().instance().set(&rep_key, &new_score);
 
         recorded.set(signal_id, true);
-        env.storage().instance().set(&StorageKey::RecordedSignalOutcomes, &recorded);
+        env.storage()
+            .instance()
+            .set(&StorageKey::RecordedSignalOutcomes, &recorded);
 
         events::emit_reputation_updated(&env, provider.clone(), old_score, new_score);
         Ok(())
@@ -713,10 +738,7 @@ fn save_category_index_map(env: &Env, map: &Map<SignalCategory, Vec<u64>>) {
 
     pub fn get_provider_reputation_score(env: Env, provider: Address) -> u32 {
         let rep_key = StorageKey::ProviderReputationScore(provider);
-        env.storage()
-            .instance()
-            .get(&rep_key)
-            .unwrap_or(50)
+        env.storage().instance().get(&rep_key).unwrap_or(50)
     }
 
     pub fn get_provider_stats(env: Env, provider: Address) -> Option<ProviderPerformance> {
@@ -953,7 +975,13 @@ fn save_category_index_map(env: &Env, map: &Map<SignalCategory, Vec<u64>>) {
             );
         }
 
-        contests::apply_trade_to_contest_entries(&env, signal_id, &provider_for_contest, roi, volume);
+        contests::apply_trade_to_contest_entries(
+            &env,
+            signal_id,
+            &provider_for_contest,
+            roi,
+            volume,
+        );
 
         Ok(())
     }
@@ -1036,7 +1064,7 @@ fn save_category_index_map(env: &Env, map: &Map<SignalCategory, Vec<u64>>) {
         result
     }
 
-/* =========================
+    /* =========================
        SIGNAL ADOPTION (Issue #169)
     ========================== */
 
@@ -1058,7 +1086,11 @@ fn save_category_index_map(env: &Env, map: &Map<SignalCategory, Vec<u64>>) {
 
         // Check nonce to prevent double-increment
         let nonce_key = (signal_id, nonce);
-        let nonces: Map<(u64, u64), bool> = env.storage().instance().get(&StorageKey::AdoptionNonces).unwrap_or(Map::new(&env));
+        let nonces: Map<(u64, u64), bool> = env
+            .storage()
+            .instance()
+            .get(&StorageKey::AdoptionNonces)
+            .unwrap_or(Map::new(&env));
         if nonces.contains_key(nonce_key.clone()) {
             return Err(AdminError::InvalidParameter); // Already incremented
         }
@@ -1070,14 +1102,19 @@ fn save_category_index_map(env: &Env, map: &Map<SignalCategory, Vec<u64>>) {
             return Err(AdminError::InvalidParameter);
         }
 
-        signal.adoption_count = signal.adoption_count.checked_add(1).ok_or(AdminError::InvalidParameter)?;
+        signal.adoption_count = signal
+            .adoption_count
+            .checked_add(1)
+            .ok_or(AdminError::InvalidParameter)?;
         signals.set(signal_id, signal.clone());
         Self::save_signals_map(&env, &signals);
 
         // Save nonce
         let mut nonces = nonces;
         nonces.set(nonce_key, true);
-        env.storage().instance().set(&StorageKey::AdoptionNonces, &nonces);
+        env.storage()
+            .instance()
+            .set(&StorageKey::AdoptionNonces, &nonces);
 
         // Emit event
         events::emit_signal_adopted(&env, signal_id, caller.clone(), signal.adoption_count);
@@ -1134,7 +1171,15 @@ fn save_category_index_map(env: &Env, map: &Map<SignalCategory, Vec<u64>>) {
         category_filter: Option<SignalCategory>,
     ) -> Vec<SignalSummary> {
         let signals_map = Self::get_signals_map(&env);
-        query::get_active_signals(&env, &signals_map, provider, offset, limit, sort_by, category_filter)
+        query::get_active_signals(
+            &env,
+            &signals_map,
+            provider,
+            offset,
+            limit,
+            sort_by,
+            category_filter,
+        )
     }
 
     /// Legacy fallback if front-ends rely on Old behavior
@@ -1754,7 +1799,12 @@ fn save_category_index_map(env: &Env, map: &Map<SignalCategory, Vec<u64>>) {
             source_address.clone(),
             proof,
         );
-        events::emit_cross_chain_address_registered(&env, source_chain, source_address, stellar_address);
+        events::emit_cross_chain_address_registered(
+            &env,
+            source_chain,
+            source_address,
+            stellar_address,
+        );
         Ok(())
     }
 
@@ -1892,12 +1942,7 @@ fn save_category_index_map(env: &Env, map: &Map<SignalCategory, Vec<u64>>) {
         signals.set(cc_signal.stellar_signal_id, signal.clone());
         Self::save_signals_map(&env, &signals);
 
-        events::emit_cross_chain_signal_synced(
-            &env,
-            source_chain,
-            source_id,
-            signal.status as u32,
-        );
+        events::emit_cross_chain_signal_synced(&env, source_chain, source_id, signal.status as u32);
 
         Ok(())
     }
@@ -1914,7 +1959,12 @@ fn save_category_index_map(env: &Env, map: &Map<SignalCategory, Vec<u64>>) {
         let performance = Self::get_provider_stats(env.clone(), provider.clone())?;
         let stake_info = stake::get_stake_info(&env, &provider);
 
-        Some(calculate_trust_score(&env, &provider, &performance, &stake_info))
+        Some(calculate_trust_score(
+            &env,
+            &provider,
+            &performance,
+            &stake_info,
+        ))
     }
 
     /// Update trust score for a provider (called after performance changes)
@@ -1946,9 +1996,11 @@ fn save_category_index_map(env: &Env, map: &Map<SignalCategory, Vec<u64>>) {
         // Collect providers with sufficient history
         for key in stats_map.keys() {
             if let Some(performance) = stats_map.get(key.clone()) {
-                if performance.total_signals >= 5 { // MIN_SIGNALS_FOR_TRUST_SCORE
+                if performance.total_signals >= 5 {
+                    // MIN_SIGNALS_FOR_TRUST_SCORE
                     let stake_info = stake::get_stake_info(&env, &key);
-                    let score_details = calculate_trust_score(&env, &key, &performance, &stake_info);
+                    let score_details =
+                        calculate_trust_score(&env, &key, &performance, &stake_info);
                     providers_with_scores.push_back((key, score_details));
                 }
             }
@@ -2011,7 +2063,8 @@ fn save_category_index_map(env: &Env, map: &Map<SignalCategory, Vec<u64>>) {
             if let Some(performance) = stats_map.get(key.clone()) {
                 if performance.total_signals >= 5 {
                     let stake_info = stake::get_stake_info(&env, &key);
-                    let score_details = calculate_trust_score(&env, &key, &performance, &stake_info);
+                    let score_details =
+                        calculate_trust_score(&env, &key, &performance, &stake_info);
 
                     match score_details.tier {
                         TrustScoreTier::HighlyTrusted => highly_trusted += 1,
@@ -2028,17 +2081,19 @@ fn save_category_index_map(env: &Env, map: &Map<SignalCategory, Vec<u64>>) {
 }
 
 #[cfg(test)]
+mod test_admin_transfer;
+#[cfg(test)]
+mod test_adoption;
+#[cfg(test)]
 mod test_combos;
 #[cfg(test)]
 mod test_contests;
 #[cfg(test)]
-mod test_scheduling;
-#[cfg(test)]
-mod test_versioning;
-#[cfg(test)]
 mod test_emergency;
+mod test_health;
+#[cfg(test)]
+mod test_scheduling;
 #[cfg(test)]
 mod test_signal_issues;
 #[cfg(test)]
-mod test_adoption;
-mod test_health;
+mod test_versioning;
