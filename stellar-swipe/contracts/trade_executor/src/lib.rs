@@ -376,6 +376,72 @@ feature/copy-trade-balance-check
 main
  main
     }
+
+    // ── Manual position exit ──────────────────────────────────────────────────
+
+    /// Cancel a copy trade manually: executes a SDEX swap to close the position,
+    /// records exit in UserPortfolio, and emits `TradeCancelled`.
+    ///
+    /// Returns `Unauthorized` if `caller != user`, `TradeNotFound` if the position
+    /// does not exist. If the SDEX swap fails the position remains open.
+    pub fn cancel_copy_trade(
+        env: Env,
+        caller: Address,
+        user: Address,
+        trade_id: u64,
+        from_token: Address,
+        to_token: Address,
+        amount: i128,
+        min_received: i128,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        if caller != user {
+            return Err(ContractError::Unauthorized);
+        }
+
+        let portfolio: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::UserPortfolio)
+            .ok_or(ContractError::NotInitialized)?;
+
+        // Verify the position exists for this user.
+        let exists: bool = {
+            let sym = Symbol::new(&env, "has_position");
+            let mut args = Vec::<Val>::new(&env);
+            args.push_back(user.clone().into_val(&env));
+            args.push_back(trade_id.into_val(&env));
+            env.invoke_contract::<bool>(&portfolio, &sym, args)
+        };
+        if !exists {
+            return Err(ContractError::TradeNotFound);
+        }
+
+        let router: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::SdexRouter)
+            .ok_or(ContractError::NotInitialized)?;
+
+        // Execute SDEX swap to close the position. If this fails, position stays open.
+        let exit_price = execute_sdex_swap(&env, &router, &from_token, &to_token, amount, min_received)?;
+
+        // Compute realized P&L and close position in UserPortfolio.
+        let realized_pnl = exit_price - amount;
+        let close_sym = Symbol::new(&env, "close_position");
+        let mut close_args = Vec::<Val>::new(&env);
+        close_args.push_back(user.clone().into_val(&env));
+        close_args.push_back(trade_id.into_val(&env));
+        close_args.push_back(realized_pnl.into_val(&env));
+        env.invoke_contract::<()>(&portfolio, &close_sym, close_args);
+
+        env.events().publish(
+            (Symbol::new(&env, "TradeCancelled"), user.clone()),
+            (trade_id, exit_price, realized_pnl),
+        );
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
