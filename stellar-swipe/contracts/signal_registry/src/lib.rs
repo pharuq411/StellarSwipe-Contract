@@ -30,15 +30,9 @@ use admin::{
     get_admin, get_admin_config, init_admin, is_trading_paused,
     require_not_paused_legacy as require_not_paused, AdminConfig,
 };
- refactor/157-shared-constants
-use stellar_swipe_common::emergency::PauseState;
-
 use stellar_swipe_common::emergency::{PauseState, CAT_ALL, CAT_SIGNALS, CAT_STAKES, CAT_TRADING};
- main
 use stellar_swipe_common::rate_limit::{self as rl, ActionType as RLAction, RateLimitConfig};
-use stellar_swipe_common::{
-    CAT_ALL, CAT_SIGNALS, CAT_STAKES, CAT_TRADING, SECONDS_PER_30_DAY_MONTH,
-};
+use stellar_swipe_common::SECONDS_PER_30_DAY_MONTH;
 
 use categories::{RiskLevel, SignalCategory};
 use combos::{
@@ -48,8 +42,8 @@ use combos::{
 };
 use contests::{Contest, ContestEntry, ContestMetric, ContestStatus};
 use errors::{
-    AdminError, ComboError, ContestError, CrossChainError, SignalEditError, SignalOutcomeError,
-    TemplateError, VersioningError,
+    AdminError, AiScoreError, ComboError, ContestError, CrossChainError, SignalEditError,
+    SignalOutcomeError, TemplateError, VersioningError,
 };
 pub use leaderboard::{
     get_leaderboard as get_leaderboard_internal, LeaderboardMetric, ProviderLeaderboard,
@@ -99,6 +93,8 @@ pub enum StorageKey {
     AdoptionNonces,
     /// Authorized TradeExecutor contract address (set by admin).
     TradeExecutor,
+    /// Address allowed to call `set_ai_score` (off-chain AI integration).
+    AiOracle,
     /// Recorded post-close outcomes per signal (Issue #170).
     RecordedSignalOutcomes,
     /// Rolling reputation score per provider (Issue #170).
@@ -263,18 +259,6 @@ impl SignalRegistry {
         caller: Address,
         new_admin: Address,
     ) -> Result<(), AdminError> {
-        admin::propose_admin_transfer(&env, &caller, new_admin)
-    }
-
-    pub fn accept_admin_transfer(env: Env, caller: Address) -> Result<(), AdminError> {
-        admin::accept_admin_transfer(&env, &caller)
-    }
-
-    pub fn cancel_admin_transfer(env: Env, caller: Address) -> Result<(), AdminError> {
-        admin::cancel_admin_transfer(&env, &caller)
-    }
-
-    pub fn propose_admin_transfer(env: Env, caller: Address, new_admin: Address) -> Result<(), AdminError> {
         admin::propose_admin_transfer(&env, &caller, new_admin)
     }
 
@@ -611,6 +595,7 @@ impl SignalRegistry {
             rationale_hash,
             confidence: 50,
             adoption_count: 0,
+            ai_validation_score: None,
         };
 
         // Auto-enter signal into active contests (before moving signal)
@@ -647,6 +632,48 @@ impl SignalRegistry {
     pub fn get_signal(env: Env, signal_id: u64) -> Option<Signal> {
         let signals = Self::get_signals_map(&env);
         signals.get(signal_id)
+    }
+
+    /// Admin: configure the address that may invoke [`Self::set_ai_score`] (xAI / validation worker).
+    pub fn set_ai_oracle(env: Env, caller: Address, oracle: Address) -> Result<(), AdminError> {
+        admin::require_admin(&env, &caller)?;
+        caller.require_auth();
+        env.storage()
+            .instance()
+            .set(&StorageKey::AiOracle, &oracle);
+        Ok(())
+    }
+
+    /// Authorized AI oracle only: persist `score` in \[0, 100\] on the signal (`None` until set).
+    pub fn set_ai_score(
+        env: Env,
+        caller: Address,
+        signal_id: u64,
+        score: u32,
+    ) -> Result<(), AiScoreError> {
+        caller.require_auth();
+        let oracle: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::AiOracle)
+            .ok_or(AiScoreError::OracleNotConfigured)?;
+        if caller != oracle {
+            return Err(AiScoreError::Unauthorized);
+        }
+        if score > 100 {
+            return Err(AiScoreError::InvalidScore);
+        }
+
+        let mut signals = Self::get_signals_map(&env);
+        let mut signal = signals
+            .get(signal_id)
+            .ok_or(AiScoreError::SignalNotFound)?;
+        signal.ai_validation_score = Some(score);
+        signals.set(signal_id, signal.clone());
+        Self::save_signals_map(&env, &signals);
+
+        events::emit_ai_score_set(&env, signal_id, score, caller);
+        Ok(())
     }
 
     /// Edit price, rationale hash, or confidence within 60s of `submitted_at` (Issue #168).
@@ -2107,13 +2134,13 @@ mod test_combos;
 mod test_contests;
 #[cfg(test)]
 mod test_emergency;
-mod test_health;
 #[cfg(test)]
 mod test_scheduling;
 #[cfg(test)]
 mod test_signal_issues;
 #[cfg(test)]
-mod test_adoption;
-#[cfg(test)]
 mod test_admin_transfer;
+#[cfg(test)]
 mod test_health;
+#[cfg(test)]
+mod test_ai_score;

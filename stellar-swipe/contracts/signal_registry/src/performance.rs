@@ -263,6 +263,7 @@ mod tests {
             rationale_hash: soroban_sdk::String::from_str(&soroban_sdk::Env::default(), "Test"),
             confidence: 50,
             adoption_count: 0,
+            ai_validation_score: None,
         };
 
         let status = evaluate_signal_status(&signal, 2001);
@@ -293,6 +294,7 @@ mod tests {
             rationale_hash: soroban_sdk::String::from_str(&soroban_sdk::Env::default(), "Test"),
             confidence: 50,
             adoption_count: 0,
+            ai_validation_score: None,
         };
 
         assert_eq!(get_signal_average_roi(&signal), 0);

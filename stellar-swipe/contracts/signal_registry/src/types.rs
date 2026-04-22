@@ -71,6 +71,8 @@ pub struct Signal {
     pub confidence: u32,
     /// Number of unique adoptions/trades copying this signal
     pub adoption_count: u32,
+    /// Optional xAI (or other) off-chain validation score, 0–100; set only by the configured AI oracle.
+    pub ai_validation_score: Option<u32>,
 }
 
 /// Outcome reported by TradeExecutor when a signal is closed (Issue #170).
