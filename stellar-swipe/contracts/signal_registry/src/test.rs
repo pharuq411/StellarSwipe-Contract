@@ -349,7 +349,7 @@ fn test_admin_transfer_expires() {
         .with_mut(|ledger| ledger.sequence_number += 34_560 + 1);
 
     let result = client.try_accept_admin_transfer(&pending_admin);
-    assert_eq!(result, Err(Ok(AdminError::AdminTransferExpired)));
+    assert_eq!(result, Err(Ok(AdminError::PendingAdminExpired)));
     assert_eq!(client.get_admin(), admin);
 }
 
@@ -370,7 +370,7 @@ fn test_admin_transfer_can_be_cancelled() {
     client.cancel_admin_transfer(&admin);
 
     let result = client.try_accept_admin_transfer(&pending_admin);
-    assert_eq!(result, Err(Ok(AdminError::NoPendingAdminTransfer)));
+    assert_eq!(result, Err(Ok(AdminError::PendingAdminNotFound)));
     assert_eq!(client.get_admin(), admin);
 }
 

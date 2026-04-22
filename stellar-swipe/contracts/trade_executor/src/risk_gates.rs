@@ -1,39 +1,22 @@
-feature/copy-trade-balance-check
 //! Pre-trade safety checks (position caps, balance, etc.).
-
-//! Pre-trade safety checks (position caps, etc.).
-main
 //!
 //! Copy trading consults the configured **user portfolio** contract for open position
-//! counts via `get_open_position_count(user)`. Point this at your deployment’s portfolio
-//! contract (any Soroban contract that exposes that function and symbol).
+//! counts via `get_open_position_count(user)`.
 
- feature/copy-trade-balance-check
 use soroban_sdk::{token, Address, Env, IntoVal, Symbol, Val, Vec};
 
 use crate::errors::{ContractError, InsufficientBalanceDetail};
 
-use soroban_sdk::{Address, Env, IntoVal, Symbol, Val, Vec};
-
-use crate::errors::ContractError;
- main
-
-/// Default maximum open copy-trade positions per user (safety rail for novices).
+/// Default maximum open copy-trade positions per user.
 pub const MAX_POSITIONS_PER_USER: u32 = 20;
 
- feature/copy-trade-balance-check
-/// Default estimated fee budget (in token smallest units) included in the balance check.
-/// Covers typical Soroban + downstream invocation costs; override via admin storage if needed.
+/// Default estimated fee budget (in token smallest units) for balance checks.
 pub const DEFAULT_ESTIMATED_COPY_TRADE_FEE: i128 = 500_000;
 
 /// Portfolio entrypoint: `get_open_position_count(user: Address) -> u32`.
 pub const GET_OPEN_POSITION_COUNT_FN: &str = "get_open_position_count";
 
-/// Ensure `user` holds at least `amount + estimated_fee` of `token` (SEP-41 SAC balance).
-///
-/// `amount` must be positive; `estimated_fee` must be non‑negative. Compares **raw** on-chain
-/// balance to **required** spend including fees so users see a clear shortfall before any
-/// router / SDEX invocation.
+/// Ensure `user` holds at least `amount + estimated_fee` of `token` (SAC balance).
 pub fn check_user_balance(
     env: &Env,
     user: &Address,
@@ -59,15 +42,7 @@ pub fn check_user_balance(
     }
 }
 
-
-/// Portfolio entrypoint: `get_open_position_count(user: Address) -> u32`.
-pub const GET_OPEN_POSITION_COUNT_FN: &str = "get_open_position_count";
-
- main
-/// Enforce per-user open position cap unless `user` is on the admin whitelist.
-///
-/// Call from [`crate::TradeExecutorContract::execute_copy_trade`] **before** any state
-/// changes or downstream portfolio updates.
+/// Enforce per-user open position cap unless `user` is exempt.
 pub fn check_position_limit(
     env: &Env,
     user_portfolio: &Address,

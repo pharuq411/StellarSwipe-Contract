@@ -200,8 +200,9 @@ fn emit_rate_limit_hit(env: &Env, user: Address, action: ActionType, count: u32,
         ActionType::StakeChange => symbol_short!("stake"),
         ActionType::FollowAction => symbol_short!("follow"),
     };
-    let topics = (Symbol::new(env, "rate_limit_hit"), user, action_sym);
-    env.events().publish(topics, (count, limit));
+    let topics = (Symbol::new(env, "rate_limit_hit"),);
+    env.events()
+        .publish(topics, (user, action_sym, count, limit));
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

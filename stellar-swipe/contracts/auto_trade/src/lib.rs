@@ -1,6 +1,5 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, String, Vec};
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Symbol, Vec};
 
 mod admin;
@@ -19,7 +18,6 @@ mod portfolio_insurance;
 mod positions;
 mod rate_limit;
 mod referral;
-mod rate_limit;
 mod risk;
 mod risk_parity;
 mod sdex;
@@ -36,7 +34,6 @@ pub use storage::{set_signal, Signal};
 
 use crate::storage::DataKey;
 use advanced_risk::AutoSellResult;
-use errors::AutoTradeError;
 use stellar_swipe_common::emergency::{CAT_ALL, CAT_TRADING, PauseState};
 use stellar_swipe_common::{health_uninitialized, HealthStatus};
 
@@ -284,8 +281,6 @@ impl AutoTradeContract {
 
         risk::set_asset_price(&env, signal.base_asset, signal.price);
 
- main
-
         // Fetch oracle price for manipulation-resistant stop-loss evaluation.
         // Falls back to None (SDEX spot) when no oracle is configured.
         let oracle_price: Option<i128> = oracle::get_oracle_price(&env, signal.base_asset)
@@ -293,7 +288,6 @@ impl AutoTradeContract {
             .map(|op| oracle::oracle_price_to_i128(&op));
 
         // Perform risk checks
- main
         let stop_loss_triggered = risk::validate_trade(
             &env,
             &user,
@@ -459,7 +453,7 @@ impl AutoTradeContract {
         user: Address,
         trade_id: soroban_sdk::BytesN<32>,
         exit_price: i128,
-    )  Option<positions::PositionResult> {
+    ) -> Option<positions::PositionResult> {
         user.require_auth();
         positions::close_position(&env, &user, &trade_id, exit_price)
     }
@@ -614,7 +608,7 @@ impl AutoTradeContract {
         user: Address,
         asset_id: u32,
         price: i128,
-    )  Option<AutoSellResult> {
+    ) -> Option<AutoSellResult> {
         let result = advanced_risk::process_price_update(&env, &user, asset_id, price);
 
         if let Some(ref sell_result) = result {
