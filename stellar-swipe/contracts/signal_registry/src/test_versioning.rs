@@ -31,6 +31,7 @@ fn create_test_signal(env: &Env, provider: Address, signal_id: u64) -> Signal {
         rationale_hash: String::from_str(env, "Initial rationale"),
         confidence: 50,
         adoption_count: 0,
+        ai_validation_score: None,
     }
 }
 

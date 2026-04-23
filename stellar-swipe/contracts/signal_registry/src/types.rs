@@ -71,6 +71,42 @@ pub struct Signal {
     pub confidence: u32,
     /// Number of unique adoptions/trades copying this signal
     pub adoption_count: u32,
+    /// Optional xAI (or other) off-chain validation score, 0–100; set only by the configured AI oracle.
+    pub ai_validation_score: Option<u32>,
+}
+
+/// Legacy on-chain format (v1) before v2 added `submitted_at`, `rationale_hash`,
+/// `confidence`, and `adoption_count`. Used only for admin migration to [`Signal`].
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignalV1 {
+    pub id: u64,
+    pub provider: Address,
+    pub asset_pair: String,
+    pub action: SignalAction,
+    pub price: i128,
+    pub rationale: String,
+    pub timestamp: u64,
+    pub expiry: u64,
+    pub status: SignalStatus,
+    pub executions: u32,
+    pub successful_executions: u32,
+    pub total_volume: i128,
+    pub total_roi: i128,
+    pub category: SignalCategory,
+    pub tags: Vec<String>,
+    pub risk_level: RiskLevel,
+    pub is_collaborative: bool,
+}
+
+/// Emitted each time `migrate_signals_v1_to_v2` processes a batch.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MigrationProgress {
+    /// How many v1 records were written to v2 in this batch.
+    pub migrated_count: u32,
+    /// Total v1 records that existed at the start of migration (constant across batches).
+    pub total_count: u32,
 }
 
 /// Outcome reported by TradeExecutor when a signal is closed (Issue #170).

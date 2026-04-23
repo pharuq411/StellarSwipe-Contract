@@ -1,8 +1,7 @@
 use soroban_sdk::{contracterror, contracttype};
 
-/// Populated when [`crate::ContractError::InsufficientBalance`] is returned from
-/// [`crate::TradeExecutorContract::execute_copy_trade`]; query via
-/// [`crate::TradeExecutorContract::get_insufficient_balance_detail`].
+/// Populated when [`ContractError::InsufficientBalance`] is returned from
+/// [`crate::TradeExecutorContract::execute_copy_trade`].
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InsufficientBalanceDetail {

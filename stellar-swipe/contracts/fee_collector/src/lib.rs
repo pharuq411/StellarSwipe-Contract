@@ -19,11 +19,9 @@ pub use storage::{
 };
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env};
- refactor/157-shared-constants
-use stellar_swipe_common::SECONDS_PER_DAY;
 
 use stellar_swipe_common::Asset;
- main
+use stellar_swipe_common::SECONDS_PER_DAY;
 
 #[cfg(test)]
 mod test;

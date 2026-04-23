@@ -4,9 +4,12 @@
 
 mod queries;
 mod storage;
+mod subscriptions;
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, Vec};
 use storage::DataKey;
+
+pub use subscriptions::SubscriptionError;
 
 /// Aggregated P&L for display. When the oracle cannot supply a price and there are open
 /// positions, `unrealized_pnl` is `None` and `total_pnl` equals `realized_pnl` only.
@@ -93,8 +96,19 @@ impl UserPortfolio {
         id
     }
 
-    /// Closes an open position and records realized P&L for that leg.
-    pub fn close_position(env: Env, user: Address, position_id: u64, realized_pnl: i128) {
+    /// Closes an open position, records realized P&L, and emits `TradeShareable` for
+    /// profitable closes (pnl > 0) so the frontend can generate an X share card.
+    #[allow(clippy::too_many_arguments)]
+    pub fn close_position(
+        env: Env,
+        user: Address,
+        position_id: u64,
+        realized_pnl: i128,
+        exit_price: i128,
+        asset_pair: u32,
+        signal_provider: Address,
+        signal_id: u64,
+    ) {
         user.require_auth();
         let key = DataKey::UserPositions(user.clone());
         let list: Vec<u64> = env
@@ -127,11 +141,54 @@ impl UserPortfolio {
         pos.status = PositionStatus::Closed;
         pos.realized_pnl = realized_pnl;
         env.storage().persistent().set(&pkey, &pos);
+
+        // Emit TradeShareable only for profitable closes (pnl > 0).
+        if realized_pnl > 0 {
+            // pnl_bps = realized_pnl * 10_000 / entry_price (saturate on overflow).
+            let pnl_bps: i64 = if pos.entry_price > 0 {
+                realized_pnl
+                    .checked_mul(10_000)
+                    .and_then(|n| n.checked_div(pos.entry_price))
+                    .and_then(|v| i64::try_from(v).ok())
+                    .unwrap_or(i64::MAX)
+            } else {
+                0
+            };
+            env.events().publish(
+                (Symbol::new(&env, "TradeShareable"), user.clone()),
+                (position_id, asset_pair, pos.entry_price, exit_price, pnl_bps, signal_provider, signal_id),
+            );
+        }
     }
 
     /// Portfolio P&L including open positions when oracle price is available.
     pub fn get_pnl(env: Env, user: Address) -> PnlSummary {
         queries::compute_get_pnl(&env, user)
+    }
+
+    /// Provider sets per-day fee token + amount for their premium feed (XLM or USDC, etc.).
+    pub fn set_provider_subscription_terms(
+        env: Env,
+        provider: Address,
+        fee_token: Address,
+        fee_per_day: i128,
+    ) -> Result<(), SubscriptionError> {
+        subscriptions::set_provider_subscription_terms(&env, &provider, fee_token, fee_per_day)
+    }
+
+    /// Pay the provider-configured fee and extend on-chain subscription through `duration_days`.
+    pub fn subscribe_to_provider(
+        env: Env,
+        user: Address,
+        provider: Address,
+        duration_days: u32,
+    ) -> Result<(), SubscriptionError> {
+        subscriptions::subscribe_to_provider(&env, &user, &provider, duration_days)
+    }
+
+    /// Used by SignalRegistry (cross-contract) to gate PREMIUM signal visibility.
+    pub fn check_subscription(env: Env, user: Address, provider: Address) -> bool {
+        subscriptions::check_subscription(&env, &user, &provider)
     }
 
     fn require_admin(env: &Env) {
@@ -206,23 +263,27 @@ mod tests {
         (user, contract_id, oracle_id)
     }
 
+    fn dummy_provider(env: &Env) -> Address {
+        Address::generate(env)
+    }
+
     /// All positions closed: unrealized is 0, total = realized, ROI uses invested sums.
     #[test]
     fn get_pnl_all_closed() {
         let env = Env::default();
         let (user, portfolio_id, _) = setup_portfolio(&env, true, 100);
         let client = UserPortfolioClient::new(&env, &portfolio_id);
+        let provider = dummy_provider(&env);
 
         client.open_position(&user, &100, &1_000);
         client.open_position(&user, &100, &500);
-        client.close_position(&user, &1, &200);
-        client.close_position(&user, &2, &-50);
+        client.close_position(&user, &1, &200, &110i128, &1u32, &provider, &0u64);
+        client.close_position(&user, &2, &-50, &90i128, &1u32, &provider, &0u64);
 
         let pnl = client.get_pnl(&user);
         assert_eq!(pnl.realized_pnl, 150);
         assert_eq!(pnl.unrealized_pnl, Some(0));
         assert_eq!(pnl.total_pnl, 150);
-        // invested 1500, roi = 150 * 10000 / 1500 = 1000 bps = 10%
         assert_eq!(pnl.roi_bps, 1000);
     }
 
@@ -233,7 +294,6 @@ mod tests {
         let (user, portfolio_id, oracle_id) = setup_portfolio(&env, true, 100);
         let client = UserPortfolioClient::new(&env, &portfolio_id);
 
-        // entry 100, amount 1000, current 120 -> (120-100)*1000/100 = 200
         client.open_position(&user, &100, &1_000);
         OracleMockClient::new(&env, &oracle_id).set_price(&120);
 
@@ -241,7 +301,7 @@ mod tests {
         assert_eq!(pnl.realized_pnl, 0);
         assert_eq!(pnl.unrealized_pnl, Some(200));
         assert_eq!(pnl.total_pnl, 200);
-        assert_eq!(pnl.roi_bps, 2000); // 200/1000 * 10000
+        assert_eq!(pnl.roi_bps, 2000);
     }
 
     /// Mixed open + closed.
@@ -250,18 +310,17 @@ mod tests {
         let env = Env::default();
         let (user, portfolio_id, oracle_id) = setup_portfolio(&env, true, 50);
         let client = UserPortfolioClient::new(&env, &portfolio_id);
+        let provider = dummy_provider(&env);
 
         client.open_position(&user, &50, &2_000);
         client.open_position(&user, &50, &1_000);
-        client.close_position(&user, &1, &300);
+        client.close_position(&user, &1, &300, &60i128, &1u32, &provider, &0u64);
 
         OracleMockClient::new(&env, &oracle_id).set_price(&60);
-        // open pos 2: (60-50)*1000/50 = 200
         let pnl = client.get_pnl(&user);
         assert_eq!(pnl.realized_pnl, 300);
         assert_eq!(pnl.unrealized_pnl, Some(200));
         assert_eq!(pnl.total_pnl, 500);
-        // invested: closed 2000 + open 1000 = 3000
         assert_eq!(pnl.roi_bps, 1666);
     }
 
@@ -271,16 +330,87 @@ mod tests {
         let env = Env::default();
         let (user, portfolio_id, _) = setup_portfolio(&env, false, 0);
         let client = UserPortfolioClient::new(&env, &portfolio_id);
+        let provider = dummy_provider(&env);
 
         client.open_position(&user, &100, &1_000);
-        client.close_position(&user, &1, &50);
+        client.close_position(&user, &1, &50, &110i128, &1u32, &provider, &0u64);
 
         client.open_position(&user, &100, &500);
         let pnl = client.get_pnl(&user);
         assert_eq!(pnl.realized_pnl, 50);
         assert_eq!(pnl.unrealized_pnl, None);
         assert_eq!(pnl.total_pnl, 50);
-        // invested: 1000 closed + 500 open = 1500
         assert_eq!(pnl.roi_bps, 333);
+    }
+
+    // ── TradeShareable event tests ─────────────────────────────────────────────
+
+    /// Profitable close emits TradeShareable with all required fields.
+    #[test]
+    fn profitable_close_emits_trade_shareable() {
+        let env = Env::default();
+        let (user, portfolio_id, _) = setup_portfolio(&env, true, 100);
+        let client = UserPortfolioClient::new(&env, &portfolio_id);
+        let provider = dummy_provider(&env);
+
+        client.open_position(&user, &100, &1_000);
+        // pnl = 200 > 0 → event must be emitted
+        client.close_position(&user, &1, &200, &120i128, &42u32, &provider, &7u64);
+
+        let found = env.events().all().iter().any(|e| {
+            let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
+            topics
+                .get(0)
+                .and_then(|v| soroban_sdk::Symbol::try_from(v).ok())
+                .map(|s| s == soroban_sdk::Symbol::new(&env, "TradeShareable"))
+                .unwrap_or(false)
+        });
+        assert!(found, "TradeShareable event not emitted for profitable close");
+    }
+
+    /// Loss close must NOT emit TradeShareable.
+    #[test]
+    fn loss_close_does_not_emit_trade_shareable() {
+        let env = Env::default();
+        let (user, portfolio_id, _) = setup_portfolio(&env, true, 100);
+        let client = UserPortfolioClient::new(&env, &portfolio_id);
+        let provider = dummy_provider(&env);
+
+        client.open_position(&user, &100, &1_000);
+        // pnl = -50 (loss) → no event
+        client.close_position(&user, &1, &-50, &90i128, &42u32, &provider, &7u64);
+
+        let found = env.events().all().iter().any(|e| {
+            let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
+            topics
+                .get(0)
+                .and_then(|v| soroban_sdk::Symbol::try_from(v).ok())
+                .map(|s| s == soroban_sdk::Symbol::new(&env, "TradeShareable"))
+                .unwrap_or(false)
+        });
+        assert!(!found, "TradeShareable must not be emitted for a loss");
+    }
+
+    /// Breakeven close (pnl == 0) must NOT emit TradeShareable.
+    #[test]
+    fn breakeven_close_does_not_emit_trade_shareable() {
+        let env = Env::default();
+        let (user, portfolio_id, _) = setup_portfolio(&env, true, 100);
+        let client = UserPortfolioClient::new(&env, &portfolio_id);
+        let provider = dummy_provider(&env);
+
+        client.open_position(&user, &100, &1_000);
+        // pnl = 0 (breakeven) → no event
+        client.close_position(&user, &1, &0, &100i128, &42u32, &provider, &7u64);
+
+        let found = env.events().all().iter().any(|e| {
+            let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
+            topics
+                .get(0)
+                .and_then(|v| soroban_sdk::Symbol::try_from(v).ok())
+                .map(|s| s == soroban_sdk::Symbol::new(&env, "TradeShareable"))
+                .unwrap_or(false)
+        });
+        assert!(!found, "TradeShareable must not be emitted for breakeven");
     }
 }

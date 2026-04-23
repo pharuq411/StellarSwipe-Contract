@@ -1,4 +1,5 @@
 #![cfg(test)]
+//! Additional integration tests; stop-loss / take-profit coverage is in `triggers::tests`.
 
 use crate::{
     errors::{ContractError, InsufficientBalanceDetail},
@@ -7,11 +8,10 @@ use crate::{
     TradeExecutorContract, TradeExecutorContractClient,
 };
 use soroban_sdk::{
-    contract, contractimpl, contracttype,
-    symbol_short,
-    testutils::Address as _,
+    contract, contractimpl, contracttype, symbol_short,
+    testutils::{Address as _, Events},
     token::{self, StellarAssetClient},
-    Address, Env, MuxedAddress,
+    Address, Env, MuxedAddress, TryFromVal,
 };
 
 // ── Mock UserPortfolio ────────────────────────────────────────────────────────
@@ -62,7 +62,9 @@ impl MockUserPortfolio {
     }
 
     // Satisfy cancel_copy_trade path.
-    pub fn has_position(_env: Env, _user: Address, _trade_id: u64) -> bool { false }
+    pub fn has_position(_env: Env, _user: Address, _trade_id: u64) -> bool {
+        false
+    }
     pub fn close_position(_env: Env, _user: Address, _trade_id: u64, _pnl: i128) {}
 }
 
@@ -90,6 +92,7 @@ fn setup_with_balance(user_balance: i128) -> (Env, Address, Address, Address, Ad
     let exec = TradeExecutorContractClient::new(&env, &exec_id);
     exec.initialize(&admin);
     exec.set_user_portfolio(&portfolio_id);
+    exec.set_sdex_router(&router_id);
 
     (env, exec_id, portfolio_id, user, admin, token)
 }
@@ -314,8 +317,10 @@ fn reentrant_call_returns_reentrancy_detected() {
     let token = sac_token(&env);
 
     // Give user enough balance so the balance check passes on the outer call.
-    StellarAssetClient::new(&env, &token)
-        .mint(&user, &(TRADE_AMOUNT + DEFAULT_ESTIMATED_COPY_TRADE_FEE + 1_000_000));
+    StellarAssetClient::new(&env, &token).mint(
+        &user,
+        &(TRADE_AMOUNT + DEFAULT_ESTIMATED_COPY_TRADE_FEE + 1_000_000),
+    );
 
     let portfolio_id = env.register(ReentrantPortfolio, ());
     let exec_id = env.register(TradeExecutorContract, ());
@@ -437,7 +442,6 @@ fn swap_returns_actual_received() {
     let exec = TradeExecutorContractClient::new(&env, &exec_id);
 
     MockSdexRouterClient::new(&env, &router_id).set_amount_out(&500_000);
-
     let out = exec.swap(&token_a, &token_b, &1_000_000, &400_000);
     assert_eq!(out, 500_000);
 }
@@ -448,7 +452,6 @@ fn swap_reverts_when_balance_below_min() {
     env.mock_all_auths();
 
     let (exec_id, router_id, token_a, token_b) = setup_executor_with_router(&env);
-
     MockSdexRouterClient::new(&env, &router_id).set_amount_out(&300_000);
 
     let err = env.as_contract(&exec_id, || {
@@ -466,7 +469,6 @@ fn swap_with_slippage_matches_formula() {
     let exec = TradeExecutorContractClient::new(&env, &exec_id);
 
     MockSdexRouterClient::new(&env, &router_id).set_amount_out(&995_000);
-
     let out = exec.swap_with_slippage(&token_a, &token_b, &1_000_000, &100);
     assert_eq!(out, 995_000);
 }
@@ -477,7 +479,6 @@ fn swap_with_slippage_reverts_when_exceeded() {
     env.mock_all_auths();
 
     let (exec_id, router_id, token_a, token_b) = setup_executor_with_router(&env);
-
     MockSdexRouterClient::new(&env, &router_id).set_amount_out(&980_000);
 
     let min = sdex::min_received_from_slippage(1_000_000, 100).unwrap();
@@ -492,12 +493,11 @@ fn swap_with_slippage_reverts_when_exceeded() {
 #[contract]
 pub struct MockPortfolioWithPositions;
 
-#[contracttype]
-#[derive(Clone)]
-enum PortfolioKey {
-    Position(Address, u64),
-    LastClosed,
-}
+/// Unfilled trade expires after timeout; keeper can call without user auth; TradeExpired emitted.
+#[test]
+fn expire_trade_unfilled_after_timeout_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
 
 #[contractimpl]
 impl MockPortfolioWithPositions {
@@ -523,7 +523,9 @@ impl MockPortfolioWithPositions {
     pub fn last_closed(env: Env) -> Option<u64> {
         env.storage().instance().get(&PortfolioKey::LastClosed)
     }
-    pub fn validate_and_record(_env: Env, _user: Address, _max_positions: u32) -> u32 { 1 }
+    pub fn validate_and_record(_env: Env, _user: Address, _max_positions: u32) -> u32 {
+        1
+    }
 }
 
 fn setup_cancel(router_out: i128) -> (Env, Address, Address, Address, Address, Address, Address) {
@@ -543,7 +545,6 @@ fn setup_cancel(router_out: i128) -> (Env, Address, Address, Address, Address, A
 
     let portfolio_id = env.register(MockPortfolioWithPositions, ());
     let exec_id = env.register(TradeExecutorContract, ());
-
     let exec = TradeExecutorContractClient::new(&env, &exec_id);
     exec.initialize(&admin);
     exec.set_user_portfolio(&portfolio_id);
@@ -551,7 +552,12 @@ fn setup_cancel(router_out: i128) -> (Env, Address, Address, Address, Address, A
 
     StellarAssetClient::new(&env, &token_a).mint(&exec_id, &1_000_000_000);
 
-    (env, exec_id, portfolio_id, user, token_a, token_b, router_id)
+    env.ledger().with_mut(|l| l.sequence_number = 200);
+
+    let err = env.as_contract(&exec_id, || {
+        TradeExecutorContract::expire_trade(env.clone(), 2u64)
+    });
+    assert_eq!(err, Err(ContractError::TradeAlreadyFilled));
 }
 
 #[test]
@@ -560,7 +566,9 @@ fn cancel_copy_trade_success() {
     let exec = TradeExecutorContractClient::new(&env, &exec_id);
 
     MockPortfolioWithPositionsClient::new(&env, &portfolio_id).add_position(&user, &1u64);
-    exec.cancel_copy_trade(&user, &user, &1u64, &token_a, &token_b, &1_000_000, &900_000);
+    exec.cancel_copy_trade(
+        &user, &user, &1u64, &token_a, &token_b, &1_000_000, &900_000,
+    );
 
     assert_eq!(
         MockPortfolioWithPositionsClient::new(&env, &portfolio_id).last_closed(),
@@ -578,7 +586,14 @@ fn cancel_copy_trade_unauthorized() {
 
     let err = env.as_contract(&exec_id, || {
         TradeExecutorContract::cancel_copy_trade(
-            env.clone(), attacker, user, 1u64, token_a, token_b, 1_000_000, 900_000,
+            env.clone(),
+            attacker,
+            user,
+            1u64,
+            token_a,
+            token_b,
+            1_000_000,
+            900_000,
         )
     });
     assert_eq!(err, Err(ContractError::Unauthorized));
@@ -592,7 +607,14 @@ fn cancel_copy_trade_not_found() {
 
     let err = env.as_contract(&exec_id, || {
         TradeExecutorContract::cancel_copy_trade(
-            env.clone(), user.clone(), user, 99u64, token_a, token_b, 1_000_000, 900_000,
+            env.clone(),
+            user.clone(),
+            user,
+            99u64,
+            token_a,
+            token_b,
+            1_000_000,
+            900_000,
         )
     });
     assert_eq!(err, Err(ContractError::TradeNotFound));
@@ -604,13 +626,15 @@ fn cancel_copy_trade_pnl_calculation() {
     let exec = TradeExecutorContractClient::new(&env, &exec_id);
 
     MockPortfolioWithPositionsClient::new(&env, &portfolio_id).add_position(&user, &2u64);
-    exec.cancel_copy_trade(&user, &user, &2u64, &token_a, &token_b, &1_000_000, &900_000);
+    exec.cancel_copy_trade(
+        &user, &user, &2u64, &token_a, &token_b, &1_000_000, &900_000,
+    );
 
     let found = env.events().all().iter().any(|e| {
         let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
         topics
             .get(0)
-            .and_then(|v| soroban_sdk::Symbol::try_from(v).ok())
+            .and_then(|v| soroban_sdk::Symbol::try_from_val(&env, &v).ok())
             .map(|s| s == soroban_sdk::Symbol::new(&env, "TradeCancelled"))
             .unwrap_or(false)
     });

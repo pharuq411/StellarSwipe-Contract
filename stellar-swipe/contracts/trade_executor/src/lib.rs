@@ -12,6 +12,8 @@ use risk_gates::{
 use sdex::{execute_sdex_swap, min_received_from_slippage};
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, IntoVal, Symbol, Val, Vec};
 
+use triggers::{ORACLE_KEY, PORTFOLIO_KEY};
+
 /// Instance storage keys.
 #[contracttype]
 #[derive(Clone)]
@@ -19,7 +21,7 @@ pub enum StorageKey {
     Admin,
     /// Contract implementing `validate_and_record(user, max_positions) -> u32` (UserPortfolio).
     UserPortfolio,
-    /// When set to `true`, this user bypasses [`risk_gates::MAX_POSITIONS_PER_USER`].
+    /// When set to `true`, this user bypasses the per-user position cap.
     PositionLimitExempt(Address),
     /// Oracle contract used by stop-loss/take-profit triggers (`get_price(asset_pair) -> i128`).
     Oracle,
@@ -27,7 +29,7 @@ pub enum StorageKey {
     StopLossPortfolio,
     /// Overrides default estimated fee used in balance checks (`None` = use default constant).
     CopyTradeEstimatedFee,
-    /// Last balance shortfall for `user` (cleared after a successful `execute_copy_trade`).
+    /// Last balance shortfall for a user (cleared after a successful `execute_copy_trade`).
     LastInsufficientBalance(Address),
     SdexRouter,
 }
@@ -126,7 +128,7 @@ impl TradeExecutorContract {
         admin.require_auth();
         env.storage()
             .instance()
-            .set(&Symbol::new(&env, triggers::ORACLE_KEY), &oracle);
+            .set(&Symbol::new(&env, ORACLE_KEY), &oracle);
     }
 
     /// Set the portfolio contract used by stop-loss/take-profit close calls (admin only).
@@ -139,7 +141,7 @@ impl TradeExecutorContract {
         admin.require_auth();
         env.storage()
             .instance()
-            .set(&Symbol::new(&env, triggers::PORTFOLIO_KEY), &portfolio);
+            .set(&Symbol::new(&env, PORTFOLIO_KEY), &portfolio);
     }
 
     /// Register a stop-loss price for `(user, trade_id)`.
@@ -164,8 +166,18 @@ impl TradeExecutorContract {
         triggers::set_take_profit(&env, &user, trade_id, take_profit_price);
     }
 
-    /// Check oracle price and trigger take-profit if breached. Returns `true` when triggered.
-    /// Stop-loss takes priority if both would trigger simultaneously.
+    pub fn set_take_profit_price_with_pair(
+        env: Env,
+        user: Address,
+        trade_id: u64,
+        take_profit_price: i128,
+        asset_pair: u32,
+    ) {
+        user.require_auth();
+        triggers::set_take_profit(&env, &user, trade_id, take_profit_price);
+        register_watch(&env, &user, trade_id, asset_pair);
+    }
+
     pub fn check_and_trigger_take_profit(
         env: Env,
         user: Address,
@@ -209,7 +221,12 @@ impl TradeExecutorContract {
 
         // ── Reentrancy guard ──────────────────────────────────────────────────
         let lock_key = Symbol::new(&env, EXECUTION_LOCK);
-        if env.storage().temporary().get::<_, bool>(&lock_key).unwrap_or(false) {
+        if env
+            .storage()
+            .temporary()
+            .get::<_, bool>(&lock_key)
+            .unwrap_or(false)
+        {
             return Err(ContractError::ReentrancyDetected);
         }
         env.storage().temporary().set(&lock_key, &true);
@@ -263,12 +280,10 @@ impl TradeExecutorContract {
         env.storage().instance().set(&StorageKey::SdexRouter, &router);
     }
 
-    /// Read configured router (for off-chain tooling).
     pub fn get_sdex_router(env: Env) -> Option<Address> {
         env.storage().instance().get(&StorageKey::SdexRouter)
     }
 
-    /// Swap using a caller-supplied minimum output (already includes slippage tolerance).
     pub fn swap(
         env: Env,
         from_token: Address,
@@ -284,7 +299,6 @@ impl TradeExecutorContract {
         execute_sdex_swap(&env, &router, &from_token, &to_token, amount, min_received)
     }
 
-    /// Swap with `min_received = amount * (10000 - max_slippage_bps) / 10000`.
     pub fn swap_with_slippage(
         env: Env,
         from_token: Address,
@@ -292,8 +306,8 @@ impl TradeExecutorContract {
         amount: i128,
         max_slippage_bps: u32,
     ) -> Result<i128, ContractError> {
-        let min_received =
-            min_received_from_slippage(amount, max_slippage_bps).ok_or(ContractError::InvalidAmount)?;
+        let min_received = min_received_from_slippage(amount, max_slippage_bps)
+            .ok_or(ContractError::InvalidAmount)?;
         Self::swap(env, from_token, to_token, amount, min_received)
     }
 
@@ -327,7 +341,7 @@ impl TradeExecutorContract {
             let mut args = Vec::<Val>::new(&env);
             args.push_back(user.clone().into_val(&env));
             args.push_back(trade_id.into_val(&env));
-            env.invoke_contract::<bool>(&portfolio, &sym, args)
+            env.invoke_contract(&portfolio, &sym, args)
         };
         if !exists {
             return Err(ContractError::TradeNotFound);
@@ -350,8 +364,8 @@ impl TradeExecutorContract {
         env.invoke_contract::<()>(&portfolio, &close_sym, close_args);
 
         env.events().publish(
-            (Symbol::new(&env, "TradeCancelled"), user.clone()),
-            (trade_id, exit_price, realized_pnl),
+            (Symbol::new(&env, "TradeCancelled"),),
+            (user, trade_id, exit_price, realized_pnl),
         );
 
         Ok(())

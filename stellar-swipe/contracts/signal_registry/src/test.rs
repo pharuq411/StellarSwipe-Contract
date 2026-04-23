@@ -5,7 +5,12 @@ extern crate std;
 use super::*;
 use crate::categories::{RiskLevel, SignalCategory};
 use crate::errors::AdminError;
-use soroban_sdk::{testutils::Address as _, vec, Env, String};
+use crate::migration::test_seed_v1_signals;
+use soroban_sdk::{
+    testutils::Address as _,
+    testutils::Ledger,
+    vec, Env, Map, String,
+};
 
 #[test]
 fn test_initialize_and_admin() {
@@ -349,7 +354,7 @@ fn test_admin_transfer_expires() {
         .with_mut(|ledger| ledger.sequence_number += 34_560 + 1);
 
     let result = client.try_accept_admin_transfer(&pending_admin);
-    assert_eq!(result, Err(Ok(AdminError::AdminTransferExpired)));
+    assert_eq!(result, Err(Ok(AdminError::PendingAdminExpired)));
     assert_eq!(client.get_admin(), admin);
 }
 
@@ -370,7 +375,7 @@ fn test_admin_transfer_can_be_cancelled() {
     client.cancel_admin_transfer(&admin);
 
     let result = client.try_accept_admin_transfer(&pending_admin);
-    assert_eq!(result, Err(Ok(AdminError::NoPendingAdminTransfer)));
+    assert_eq!(result, Err(Ok(AdminError::PendingAdminNotFound)));
     assert_eq!(client.get_admin(), admin);
 }
 
@@ -658,7 +663,7 @@ fn test_get_active_signals_excludes_expired() {
 
     // Get active signals - should only return 3 (followed_only = false)
     let any_user = Address::generate(&env);
-    let active = client.get_active_signals(&any_user, &false);
+    let active = client.get_active_signals_archived(&any_user, &false);
     assert_eq!(active.len(), 3);
 
     // All returned signals should be active
@@ -918,11 +923,11 @@ fn test_feed_filtered_by_followed() {
     client.follow_provider(&user, &provider_a);
 
     // All signals (followed_only = false)
-    let all_active = client.get_active_signals(&user, &false);
+    let all_active = client.get_active_signals_archived(&user, &false);
     assert_eq!(all_active.len(), 2);
 
     // Filtered feed (followed_only = true) - only provider_a
-    let followed_active = client.get_active_signals(&user, &true);
+    let followed_active = client.get_active_signals_archived(&user, &true);
     assert_eq!(followed_active.len(), 1);
     assert_eq!(followed_active.get(0).unwrap().provider, provider_a);
 }
@@ -1116,4 +1121,52 @@ fn test_share_template_and_submit_from_another_provider() {
     assert_eq!(signal.provider, other_provider);
     assert_eq!(signal.asset_pair, String::from_str(&env, "BTC/USDC"));
     assert_eq!(signal.action, SignalAction::Sell);
+}
+
+/// Hundred v1 records, ten batches of ten; all readable as v2; extra admin runs are no-ops (idempotent).
+#[test]
+fn migration_v1_to_v2_batches() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+
+    #[allow(deprecated)]
+    let contract_id = env.register_contract(None, SignalRegistry);
+    let client = SignalRegistryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    env.as_contract(&contract_id, || {
+        test_seed_v1_signals(&env, 100);
+    });
+
+    for _ in 0..10 {
+        client.migrate_signals_v1_to_v2(&admin, &10u32);
+    }
+
+    for sid in 1u64..=100u64 {
+        let s = client.get_signal(&sid).expect("migrated v2");
+        assert_eq!(s.id, sid);
+        assert_eq!(s.confidence, 50u32);
+        assert_eq!(s.adoption_count, 0u32);
+        assert_eq!(s.submitted_at, 1_000u64);
+    }
+
+    env.as_contract(&contract_id, || {
+        let m: Map<u64, crate::types::SignalV1> = env
+            .storage()
+            .instance()
+            .get(&StorageKey::SignalsV1)
+            .unwrap_or(Map::new(&env));
+        assert_eq!(m.len(), 0u32);
+    });
+
+    for _ in 0..2 {
+        client.migrate_signals_v1_to_v2(&admin, &10u32);
+    }
+    for sid in 1u64..=100u64 {
+        let s = client.get_signal(&sid).expect("still v2");
+        assert_eq!(s.id, sid);
+    }
 }

@@ -30,6 +30,16 @@ pub enum AdminError {
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
+pub enum AiScoreError {
+    Unauthorized = 600,
+    OracleNotConfigured = 601,
+    InvalidScore = 602,
+    SignalNotFound = 603,
+}
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
 pub enum FeeError {
     TradeTooSmall = 100,
     FeeRoundedToZero = 101,
