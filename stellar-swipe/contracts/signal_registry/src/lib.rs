@@ -45,8 +45,8 @@ use combos::{
 };
 use contests::{Contest, ContestEntry, ContestMetric, ContestStatus};
 use errors::{
-    AdminError, ComboError, ContestError, CrossChainError, SignalEditError, SignalOutcomeError,
-    TemplateError, VersioningError,
+    AdminError, AiScoreError, ComboError, ContestError, CrossChainError, SignalEditError,
+    SignalOutcomeError, TemplateError, VersioningError,
 };
 pub use leaderboard::{
     get_leaderboard as get_leaderboard_internal, LeaderboardMetric, ProviderLeaderboard,
@@ -619,6 +619,7 @@ impl SignalRegistry {
             rationale_hash,
             confidence: 50,
             adoption_count: 0,
+            ai_validation_score: None,
         };
 
         // Auto-enter signal into active contests (before moving signal)

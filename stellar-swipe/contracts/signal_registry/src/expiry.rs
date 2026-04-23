@@ -329,6 +329,7 @@ mod tests {
             rationale_hash: String::from_str(env, "Test signal"),
             confidence: 50,
             adoption_count: 0,
+            ai_validation_score: None,
         }
     }
 

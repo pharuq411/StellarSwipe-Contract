@@ -32,7 +32,11 @@ fn create_test_signal(
         tags: soroban_sdk::Vec::new(env),
         risk_level: RiskLevel::Medium,
         is_collaborative: false,
+        submitted_at: timestamp,
+        rationale_hash: String::from_str(env, "test"),
+        confidence: 50,
         adoption_count: 0,
+        ai_validation_score: None,
     }
 }
 
