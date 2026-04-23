@@ -1,4 +1,5 @@
 #![cfg(test)]
+//! Additional integration tests; stop-loss / take-profit coverage is in `triggers::tests`.
 
 use crate::{
     errors::{ContractError, InsufficientBalanceDetail},
@@ -7,15 +8,19 @@ use crate::{
     TradeExecutorContract, TradeExecutorContractClient,
 };
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short,
+    contract, contractimpl, contracttype,
+    symbol_short,
     testutils::Address as _,
     token::{self, StellarAssetClient},
     Address, Env, MuxedAddress,
 };
 
-// ── Mock contracts ────────────────────────────────────────────────────────────
+// ── Mock UserPortfolio ────────────────────────────────────────────────────────
+//
+// Exposes the batched `validate_and_record(user, max_positions) -> u32` entrypoint
+// that replaces the old two-call pattern (get_open_position_count + record_copy_position).
+// Also retains helpers used by cancel_copy_trade tests.
 
-/// Minimal UserPortfolio mock.
 #[contract]
 pub struct MockUserPortfolio;
 
@@ -27,6 +32,20 @@ enum MockKey {
 
 #[contractimpl]
 impl MockUserPortfolio {
+    /// Batched entrypoint (Issue #306): atomically checks the position cap and records
+    /// the new copy position. Panics when `open_count >= max_positions` so that
+    /// `try_invoke_contract` surfaces it as `PositionLimitReached`.
+    pub fn validate_and_record(env: Env, user: Address, max_positions: u32) -> u32 {
+        let key = MockKey::OpenCount(user.clone());
+        let count: u32 = env.storage().instance().get(&key).unwrap_or(0);
+        if count >= max_positions {
+            panic!("position limit reached");
+        }
+        let new_count = count + 1;
+        env.storage().instance().set(&key, &new_count);
+        new_count
+    }
+
     pub fn get_open_position_count(env: Env, user: Address) -> u32 {
         env.storage()
             .instance()
@@ -34,12 +53,7 @@ impl MockUserPortfolio {
             .unwrap_or(0)
     }
 
-    pub fn record_copy_position(env: Env, user: Address) {
-        let key = MockKey::OpenCount(user.clone());
-        let c: u32 = env.storage().instance().get(&key).unwrap_or(0);
-        env.storage().instance().set(&key, &(c + 1));
-    }
-
+    /// Decrement open count (simulates closing one copy position).
     pub fn close_one_copy_position(env: Env, user: Address) {
         let key = MockKey::OpenCount(user);
         let c: u32 = env.storage().instance().get(&key).unwrap_or(0);
@@ -47,9 +61,312 @@ impl MockUserPortfolio {
             env.storage().instance().set(&key, &(c - 1));
         }
     }
+
+    // Satisfy cancel_copy_trade path.
+    pub fn has_position(_env: Env, _user: Address, _trade_id: u64) -> bool { false }
+    pub fn close_position(_env: Env, _user: Address, _trade_id: u64, _pnl: i128) {}
 }
 
-/// Mock SDEX router.
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+const TRADE_AMOUNT: i128 = 1_000_000;
+
+fn sac_token(env: &Env) -> Address {
+    let issuer = Address::generate(env);
+    env.register_stellar_asset_contract_v2(issuer).address()
+}
+
+fn setup_with_balance(user_balance: i128) -> (Env, Address, Address, Address, Address, Address) {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let token = sac_token(&env);
+    let portfolio_id = env.register(MockUserPortfolio, ());
+    let exec_id = env.register(TradeExecutorContract, ());
+
+    StellarAssetClient::new(&env, &token).mint(&user, &user_balance);
+
+    let exec = TradeExecutorContractClient::new(&env, &exec_id);
+    exec.initialize(&admin);
+    exec.set_user_portfolio(&portfolio_id);
+    exec.set_sdex_router(&router_id);
+
+    (env, exec_id, portfolio_id, user, admin, token)
+}
+
+// ── Balance check unit tests ──────────────────────────────────────────────────
+
+#[test]
+fn check_user_balance_insufficient() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let user = Address::generate(&env);
+    let token = sac_token(&env);
+    let amount: i128 = 100;
+    let fee: i128 = 10;
+    let required = amount + fee;
+    StellarAssetClient::new(&env, &token).mint(&user, &(required - 1));
+
+    let err = check_user_balance(&env, &user, &token, amount, fee);
+    assert_eq!(
+        err,
+        Err(InsufficientBalanceDetail {
+            required,
+            available: required - 1,
+        })
+    );
+}
+
+#[test]
+fn check_user_balance_exactly_sufficient() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let user = Address::generate(&env);
+    let token = sac_token(&env);
+    let amount: i128 = 100;
+    let fee: i128 = 10;
+    StellarAssetClient::new(&env, &token).mint(&user, &(amount + fee));
+    assert!(check_user_balance(&env, &user, &token, amount, fee).is_ok());
+}
+
+#[test]
+fn check_user_balance_more_than_sufficient() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let user = Address::generate(&env);
+    let token = sac_token(&env);
+    let amount: i128 = 100;
+    let fee: i128 = 10;
+    StellarAssetClient::new(&env, &token).mint(&user, &(amount + fee + 1_000_000));
+    assert!(check_user_balance(&env, &user, &token, amount, fee).is_ok());
+}
+
+// ── execute_copy_trade tests ──────────────────────────────────────────────────
+
+#[test]
+fn execute_copy_trade_insufficient_balance_sets_detail() {
+    let required = TRADE_AMOUNT + DEFAULT_ESTIMATED_COPY_TRADE_FEE;
+    let (env, exec_id, _pf, user, _admin, token) = setup_with_balance(required - 1);
+    let exec = TradeExecutorContractClient::new(&env, &exec_id);
+
+    let err = env.as_contract(&exec_id, || {
+        TradeExecutorContract::execute_copy_trade(
+            env.clone(),
+            user.clone(),
+            token.clone(),
+            TRADE_AMOUNT,
+        )
+    });
+    assert_eq!(err, Err(ContractError::InsufficientBalance));
+
+    let detail = exec.get_insufficient_balance_detail(&user).unwrap();
+    assert_eq!(
+        detail,
+        InsufficientBalanceDetail {
+            required,
+            available: required - 1,
+        }
+    );
+}
+
+#[test]
+fn execute_copy_trade_sufficient_balance_invokes_portfolio() {
+    let per = TRADE_AMOUNT + DEFAULT_ESTIMATED_COPY_TRADE_FEE;
+    let (env, exec_id, portfolio_id, user, _admin, token) = setup_with_balance(per + 1_000_000);
+    let exec = TradeExecutorContractClient::new(&env, &exec_id);
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT);
+    assert!(exec.get_insufficient_balance_detail(&user).is_none());
+    assert_eq!(
+        MockUserPortfolioClient::new(&env, &portfolio_id).get_open_position_count(&user),
+        1
+    );
+}
+
+#[test]
+fn execute_copy_trade_zero_amount_invalid() {
+    let (env, exec_id, _pf, user, _admin, token) = setup_with_balance(1_000_000_000);
+    let err = env.as_contract(&exec_id, || {
+        TradeExecutorContract::execute_copy_trade(env.clone(), user.clone(), token.clone(), 0)
+    });
+    assert_eq!(err, Err(ContractError::InvalidAmount));
+}
+
+#[test]
+fn twenty_first_copy_trade_fails_until_one_closed() {
+    let per = TRADE_AMOUNT + DEFAULT_ESTIMATED_COPY_TRADE_FEE;
+    let (env, exec_id, portfolio_id, user, _admin, token) =
+        setup_with_balance(per * 30 + 1_000_000);
+    let exec = TradeExecutorContractClient::new(&env, &exec_id);
+
+    for _ in 0..MAX_POSITIONS_PER_USER {
+        exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT);
+    }
+
+    let err = env.as_contract(&exec_id, || {
+        TradeExecutorContract::execute_copy_trade(
+            env.clone(),
+            user.clone(),
+            token.clone(),
+            TRADE_AMOUNT,
+        )
+    });
+    assert_eq!(err, Err(ContractError::PositionLimitReached));
+
+    MockUserPortfolioClient::new(&env, &portfolio_id).close_one_copy_position(&user);
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT);
+
+    assert_eq!(
+        MockUserPortfolioClient::new(&env, &portfolio_id).get_open_position_count(&user),
+        MAX_POSITIONS_PER_USER
+    );
+}
+
+#[test]
+fn whitelisted_user_bypasses_position_limit() {
+    let per = TRADE_AMOUNT + DEFAULT_ESTIMATED_COPY_TRADE_FEE;
+    let (env, exec_id, portfolio_id, user, _admin, token) =
+        setup_with_balance(per * 35 + 1_000_000);
+    let exec = TradeExecutorContractClient::new(&env, &exec_id);
+
+    for _ in 0..MAX_POSITIONS_PER_USER {
+        exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT);
+    }
+
+    let err = env.as_contract(&exec_id, || {
+        TradeExecutorContract::execute_copy_trade(
+            env.clone(),
+            user.clone(),
+            token.clone(),
+            TRADE_AMOUNT,
+        )
+    });
+    assert_eq!(err, Err(ContractError::PositionLimitReached));
+
+    exec.set_position_limit_exempt(&user, &true);
+    assert!(exec.is_position_limit_exempt(&user));
+
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT);
+    assert_eq!(
+        MockUserPortfolioClient::new(&env, &portfolio_id).get_open_position_count(&user),
+        MAX_POSITIONS_PER_USER + 1
+    );
+
+    exec.set_position_limit_exempt(&user, &false);
+    assert!(!exec.is_position_limit_exempt(&user));
+
+    let err2 = env.as_contract(&exec_id, || {
+        TradeExecutorContract::execute_copy_trade(
+            env.clone(),
+            user.clone(),
+            token.clone(),
+            TRADE_AMOUNT,
+        )
+    });
+    assert_eq!(err2, Err(ContractError::PositionLimitReached));
+}
+
+// ── Reentrancy guard tests ────────────────────────────────────────────────────
+
+/// A mock portfolio that calls back into execute_copy_trade during validate_and_record,
+/// simulating a reentrant call.
+#[contract]
+pub struct ReentrantPortfolio;
+
+#[contractimpl]
+impl ReentrantPortfolio {
+    pub fn set_executor(env: Env, exec: Address) {
+        env.storage().instance().set(&symbol_short!("exec"), &exec);
+    }
+    pub fn set_user(env: Env, user: Address) {
+        env.storage().instance().set(&symbol_short!("user"), &user);
+    }
+    pub fn validate_and_record(env: Env, user: Address, _max_positions: u32) -> u32 {
+        let exec: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("exec"))
+            .unwrap();
+        // Attempt reentrant call — must be blocked.
+        let token = Address::generate(&env); // dummy token; balance check will fail first
+        let client = TradeExecutorContractClient::new(&env, &exec);
+        let result = client.try_execute_copy_trade(&user, &token, &1_000_000i128);
+        let blocked = matches!(result, Err(Ok(ContractError::ReentrancyDetected)));
+        env.storage()
+            .instance()
+            .set(&symbol_short!("blocked"), &blocked);
+        1
+    }
+    pub fn was_blocked(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("blocked"))
+            .unwrap_or(false)
+    }
+}
+
+#[test]
+fn reentrant_call_returns_reentrancy_detected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let token = sac_token(&env);
+
+    // Give user enough balance so the balance check passes on the outer call.
+    StellarAssetClient::new(&env, &token)
+        .mint(&user, &(TRADE_AMOUNT + DEFAULT_ESTIMATED_COPY_TRADE_FEE + 1_000_000));
+
+    let portfolio_id = env.register(ReentrantPortfolio, ());
+    let exec_id = env.register(TradeExecutorContract, ());
+
+    let exec = TradeExecutorContractClient::new(&env, &exec_id);
+    exec.initialize(&admin);
+    exec.set_user_portfolio(&portfolio_id);
+
+    ReentrantPortfolioClient::new(&env, &portfolio_id).set_executor(&exec_id);
+    ReentrantPortfolioClient::new(&env, &portfolio_id).set_user(&user);
+
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT);
+
+    assert!(
+        ReentrantPortfolioClient::new(&env, &portfolio_id).was_blocked(),
+        "reentrant call was not blocked with ReentrancyDetected"
+    );
+}
+
+#[test]
+fn lock_cleared_after_successful_execution() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let token = sac_token(&env);
+    let per = TRADE_AMOUNT + DEFAULT_ESTIMATED_COPY_TRADE_FEE;
+    StellarAssetClient::new(&env, &token).mint(&user, &(per * 3));
+
+    let portfolio_id = env.register(MockUserPortfolio, ());
+    let exec_id = env.register(TradeExecutorContract, ());
+
+    let exec = TradeExecutorContractClient::new(&env, &exec_id);
+    exec.initialize(&admin);
+    exec.set_user_portfolio(&portfolio_id);
+
+    // Two sequential calls must both succeed (lock is cleared between them).
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT);
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT);
+
+    assert_eq!(
+        MockUserPortfolioClient::new(&env, &portfolio_id).get_open_position_count(&user),
+        2
+    );
+}
+
+// ── SDEX swap tests ───────────────────────────────────────────────────────────
+
 #[contract]
 pub struct MockSdexRouter;
 
@@ -86,119 +403,6 @@ impl MockSdexRouter {
     }
 }
 
-/// Mock portfolio that tracks positions for cancel tests.
-#[contract]
-pub struct MockPortfolioWithPositions;
-
-#[contracttype]
-#[derive(Clone)]
-enum PortfolioKey {
-    Position(Address, u64),
-    LastClosed,
-}
-
-#[contractimpl]
-impl MockPortfolioWithPositions {
-    pub fn add_position(env: Env, user: Address, trade_id: u64) {
-        env.storage()
-            .instance()
-            .set(&PortfolioKey::Position(user, trade_id), &true);
-    }
-    pub fn has_position(env: Env, user: Address, trade_id: u64) -> bool {
-        env.storage()
-            .instance()
-            .get(&PortfolioKey::Position(user, trade_id))
-            .unwrap_or(false)
-    }
-    pub fn close_position(env: Env, user: Address, trade_id: u64, _pnl: i128) {
-        env.storage()
-            .instance()
-            .remove(&PortfolioKey::Position(user, trade_id));
-        env.storage()
-            .instance()
-            .set(&PortfolioKey::LastClosed, &trade_id);
-    }
-    pub fn last_closed(env: Env) -> Option<u64> {
-        env.storage().instance().get(&PortfolioKey::LastClosed)
-    }
-    pub fn get_open_position_count(_env: Env, _user: Address) -> u32 {
-        0
-    }
-    pub fn record_copy_position(_env: Env, _user: Address) {}
-}
-
-/// Reentrant portfolio mock.
-#[contract]
-pub struct ReentrantPortfolio;
-
-#[contractimpl]
-impl ReentrantPortfolio {
-    pub fn set_executor(env: Env, exec: Address) {
-        env.storage()
-            .instance()
-            .set(&symbol_short!("exec"), &exec);
-    }
-    pub fn set_user(env: Env, user: Address) {
-        env.storage()
-            .instance()
-            .set(&symbol_short!("user"), &user);
-    }
-    pub fn get_open_position_count(_env: Env, _user: Address) -> u32 {
-        0
-    }
-    pub fn record_copy_position(env: Env, user: Address) {
-        let exec: Address = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("exec"))
-            .unwrap();
-        let client = TradeExecutorContractClient::new(&env, &exec);
-        let result = client.try_execute_copy_trade(
-            &user,
-            &Address::generate(&env),
-            &1_000_000i128,
-        );
-        let blocked = matches!(result, Err(Ok(ContractError::ReentrancyDetected)));
-        env.storage()
-            .instance()
-            .set(&symbol_short!("blocked"), &blocked);
-    }
-    pub fn was_blocked(env: Env) -> bool {
-        env.storage()
-            .instance()
-            .get(&symbol_short!("blocked"))
-            .unwrap_or(false)
-    }
-}
-
-// ── Setup helpers ─────────────────────────────────────────────────────────────
-
-const TRADE_AMOUNT: i128 = 1_000_000;
-
-fn sac_token(env: &Env) -> Address {
-    let issuer = Address::generate(env);
-    env.register_stellar_asset_contract_v2(issuer).address()
-}
-
-fn setup_with_balance(user_balance: i128) -> (Env, Address, Address, Address, Address, Address) {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let admin = Address::generate(&env);
-    let user = Address::generate(&env);
-    let token = sac_token(&env);
-    let portfolio_id = env.register(MockUserPortfolio, ());
-    let exec_id = env.register(TradeExecutorContract, ());
-
-    StellarAssetClient::new(&env, &token).mint(&user, &user_balance);
-
-    let exec = TradeExecutorContractClient::new(&env, &exec_id);
-    exec.initialize(&admin);
-    exec.set_user_portfolio(&portfolio_id);
-
-    (env, exec_id, portfolio_id, user, admin, token)
-}
-
 fn setup_executor_with_router(env: &Env) -> (Address, Address, Address, Address) {
     let admin = Address::generate(env);
     let sac_a = env.register_stellar_asset_contract_v2(admin.clone());
@@ -218,211 +422,6 @@ fn setup_executor_with_router(env: &Env) -> (Address, Address, Address, Address)
 
     (exec_id, router_id, token_a, token_b)
 }
-
-fn setup_cancel(router_out: i128) -> (Env, Address, Address, Address, Address, Address, Address) {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let admin = Address::generate(&env);
-    let user = Address::generate(&env);
-
-    let sac_a = env.register_stellar_asset_contract_v2(admin.clone());
-    let sac_b = env.register_stellar_asset_contract_v2(admin.clone());
-    let token_a = sac_a.address();
-    let token_b = sac_b.address();
-
-    let router_id = env.register(MockSdexRouter, ());
-    MockSdexRouterClient::new(&env, &router_id).set_amount_out(&router_out);
-    StellarAssetClient::new(&env, &token_b).mint(&router_id, &10_000_000_000);
-
-    let portfolio_id = env.register(MockPortfolioWithPositions, ());
-    let exec_id = env.register(TradeExecutorContract, ());
-
-    let exec = TradeExecutorContractClient::new(&env, &exec_id);
-    exec.initialize(&admin);
-    exec.set_user_portfolio(&portfolio_id);
-    exec.set_sdex_router(&router_id);
-
-    StellarAssetClient::new(&env, &token_a).mint(&exec_id, &1_000_000_000);
-
-    (env, exec_id, portfolio_id, user, token_a, token_b, router_id)
-}
-
-// ── Balance check tests ───────────────────────────────────────────────────────
-
-#[test]
-fn check_user_balance_insufficient() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let user = Address::generate(&env);
-    let token = sac_token(&env);
-    let amount: i128 = 100;
-    let fee: i128 = 10;
-    let required = amount + fee;
-    StellarAssetClient::new(&env, &token).mint(&user, &(required - 1));
-
-    let err = check_user_balance(&env, &user, &token, amount, fee);
-    assert_eq!(
-        err,
-        Err(InsufficientBalanceDetail {
-            required,
-            available: required - 1,
-        })
-    );
-}
-
-#[test]
-fn check_user_balance_exactly_sufficient() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let user = Address::generate(&env);
-    let token = sac_token(&env);
-    let amount: i128 = 100;
-    let fee: i128 = 10;
-    let required = amount + fee;
-    StellarAssetClient::new(&env, &token).mint(&user, &required);
-    assert!(check_user_balance(&env, &user, &token, amount, fee).is_ok());
-}
-
-#[test]
-fn check_user_balance_more_than_sufficient() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let user = Address::generate(&env);
-    let token = sac_token(&env);
-    let amount: i128 = 100;
-    let fee: i128 = 10;
-    let required = amount + fee;
-    StellarAssetClient::new(&env, &token).mint(&user, &(required + 1_000_000));
-    assert!(check_user_balance(&env, &user, &token, amount, fee).is_ok());
-}
-
-// ── execute_copy_trade tests ──────────────────────────────────────────────────
-
-#[test]
-fn execute_copy_trade_insufficient_balance_sets_detail() {
-    let required = TRADE_AMOUNT + DEFAULT_ESTIMATED_COPY_TRADE_FEE;
-    let (env, exec_id, _pf, user, _admin, token) = setup_with_balance(required - 1);
-    let exec = TradeExecutorContractClient::new(&env, &exec_id);
-
-    let err = env.as_contract(&exec_id, || {
-        crate::TradeExecutorContract::execute_copy_trade(
-            env.clone(),
-            user.clone(),
-            token.clone(),
-            TRADE_AMOUNT,
-        )
-    });
-    assert_eq!(err, Err(ContractError::InsufficientBalance));
-
-    let detail = exec.get_insufficient_balance_detail(&user).unwrap();
-    assert_eq!(
-        detail,
-        InsufficientBalanceDetail {
-            required,
-            available: required - 1,
-        }
-    );
-}
-
-#[test]
-fn execute_copy_trade_sufficient_balance_invokes_portfolio() {
-    let per = TRADE_AMOUNT + DEFAULT_ESTIMATED_COPY_TRADE_FEE;
-    let (env, exec_id, portfolio_id, user, _admin, token) = setup_with_balance(per + 1_000_000);
-    let exec = TradeExecutorContractClient::new(&env, &exec_id);
-    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT);
-    assert!(exec.get_insufficient_balance_detail(&user).is_none());
-    assert_eq!(
-        MockUserPortfolioClient::new(&env, &portfolio_id).get_open_position_count(&user),
-        1
-    );
-}
-
-#[test]
-fn execute_copy_trade_zero_amount_invalid() {
-    let (env, exec_id, _pf, user, _admin, token) = setup_with_balance(1_000_000_000);
-    let err = env.as_contract(&exec_id, || {
-        crate::TradeExecutorContract::execute_copy_trade(
-            env.clone(),
-            user.clone(),
-            token.clone(),
-            0,
-        )
-    });
-    assert_eq!(err, Err(ContractError::InvalidAmount));
-}
-
-#[test]
-fn twenty_first_copy_trade_fails_until_one_closed() {
-    let per = TRADE_AMOUNT + DEFAULT_ESTIMATED_COPY_TRADE_FEE;
-    let (env, exec_id, portfolio_id, user, _admin, token) =
-        setup_with_balance(per * 30 + 1_000_000);
-    let exec = TradeExecutorContractClient::new(&env, &exec_id);
-
-    for _ in 0..MAX_POSITIONS_PER_USER {
-        exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT);
-    }
-
-    let err = env.as_contract(&exec_id, || {
-        crate::TradeExecutorContract::execute_copy_trade(
-            env.clone(),
-            user.clone(),
-            token.clone(),
-            TRADE_AMOUNT,
-        )
-    });
-    assert_eq!(err, Err(ContractError::PositionLimitReached));
-
-    MockUserPortfolioClient::new(&env, &portfolio_id).close_one_copy_position(&user);
-    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT);
-
-    let mock = MockUserPortfolioClient::new(&env, &portfolio_id);
-    assert_eq!(mock.get_open_position_count(&user), MAX_POSITIONS_PER_USER);
-}
-
-#[test]
-fn whitelisted_user_bypasses_position_limit() {
-    let per = TRADE_AMOUNT + DEFAULT_ESTIMATED_COPY_TRADE_FEE;
-    let (env, exec_id, portfolio_id, user, _admin, token) =
-        setup_with_balance(per * 35 + 1_000_000);
-    let exec = TradeExecutorContractClient::new(&env, &exec_id);
-
-    for _ in 0..MAX_POSITIONS_PER_USER {
-        exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT);
-    }
-
-    let err = env.as_contract(&exec_id, || {
-        crate::TradeExecutorContract::execute_copy_trade(
-            env.clone(),
-            user.clone(),
-            token.clone(),
-            TRADE_AMOUNT,
-        )
-    });
-    assert_eq!(err, Err(ContractError::PositionLimitReached));
-
-    exec.set_position_limit_exempt(&user, &true);
-    assert!(exec.is_position_limit_exempt(&user));
-    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT);
-
-    let mock = MockUserPortfolioClient::new(&env, &portfolio_id);
-    assert_eq!(mock.get_open_position_count(&user), MAX_POSITIONS_PER_USER + 1);
-
-    exec.set_position_limit_exempt(&user, &false);
-    assert!(!exec.is_position_limit_exempt(&user));
-
-    let err2 = env.as_contract(&exec_id, || {
-        crate::TradeExecutorContract::execute_copy_trade(
-            env.clone(),
-            user.clone(),
-            token.clone(),
-            TRADE_AMOUNT,
-        )
-    });
-    assert_eq!(err2, Err(ContractError::PositionLimitReached));
-}
-
-// ── SDEX swap tests ───────────────────────────────────────────────────────────
 
 #[test]
 fn min_received_from_slippage_one_percent() {
@@ -486,7 +485,10 @@ fn swap_with_slippage_reverts_when_exceeded() {
     assert_eq!(err, Err(ContractError::SlippageExceeded));
 }
 
-// ── Trade timeout tests ───────────────────────────────────────────────────────
+// ── cancel_copy_trade tests ───────────────────────────────────────────────────
+
+#[contract]
+pub struct MockPortfolioWithPositions;
 
 /// Unfilled trade expires after timeout; keeper can call without user auth; TradeExpired emitted.
 #[test]
@@ -494,61 +496,56 @@ fn expire_trade_unfilled_after_timeout_succeeds() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let admin = Address::generate(&env);
-    let user = Address::generate(&env);
-    let exec_id = env.register(TradeExecutorContract, ());
-    let exec = TradeExecutorContractClient::new(&env, &exec_id);
-    exec.initialize(&admin);
-
-    // Place a pending trade at ledger 0.
-    exec.place_trade(&user, &1u64, &1_000_000i128);
-
-    // Advance ledger past the timeout (TRADE_TIMEOUT_LEDGERS = 120).
-    env.ledger().with_mut(|l| l.sequence_number = 121);
-
-    // Keeper expires — no user auth required.
-    exec.expire_trade(&1u64);
-
-    // TradeExpired event must be emitted.
-    let found = env.events().all().iter().any(|e| {
-        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
-        topics
-            .get(0)
-            .and_then(|v| soroban_sdk::Symbol::try_from(v).ok())
-            .map(|s| s == soroban_sdk::Symbol::new(&env, "TradeExpired"))
+#[contractimpl]
+impl MockPortfolioWithPositions {
+    pub fn add_position(env: Env, user: Address, trade_id: u64) {
+        env.storage()
+            .instance()
+            .set(&PortfolioKey::Position(user, trade_id), &true);
+    }
+    pub fn has_position(env: Env, user: Address, trade_id: u64) -> bool {
+        env.storage()
+            .instance()
+            .get(&PortfolioKey::Position(user, trade_id))
             .unwrap_or(false)
-    });
-    assert!(found, "TradeExpired event not emitted");
+    }
+    pub fn close_position(env: Env, user: Address, trade_id: u64, _pnl: i128) {
+        env.storage()
+            .instance()
+            .remove(&PortfolioKey::Position(user, trade_id));
+        env.storage()
+            .instance()
+            .set(&PortfolioKey::LastClosed, &trade_id);
+    }
+    pub fn last_closed(env: Env) -> Option<u64> {
+        env.storage().instance().get(&PortfolioKey::LastClosed)
+    }
+    pub fn validate_and_record(_env: Env, _user: Address, _max_positions: u32) -> u32 { 1 }
 }
 
-/// Filled trade cannot be expired — returns TradeAlreadyFilled.
-#[test]
-fn expire_trade_filled_returns_error() {
-    use crate::wire::{TradeOrder, TradeStatus};
-    use crate::StorageKey;
-
+fn setup_cancel(router_out: i128) -> (Env, Address, Address, Address, Address, Address, Address) {
     let env = Env::default();
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
+    let sac_a = env.register_stellar_asset_contract_v2(admin.clone());
+    let sac_b = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_a = sac_a.address();
+    let token_b = sac_b.address();
+
+    let router_id = env.register(MockSdexRouter, ());
+    MockSdexRouterClient::new(&env, &router_id).set_amount_out(&router_out);
+    StellarAssetClient::new(&env, &token_b).mint(&router_id, &10_000_000_000);
+
+    let portfolio_id = env.register(MockPortfolioWithPositions, ());
     let exec_id = env.register(TradeExecutorContract, ());
     let exec = TradeExecutorContractClient::new(&env, &exec_id);
     exec.initialize(&admin);
+    exec.set_user_portfolio(&portfolio_id);
+    exec.set_sdex_router(&router_id);
 
-    // Manually store a Filled order.
-    env.as_contract(&exec_id, || {
-        let order = TradeOrder {
-            trade_id: 2u64,
-            user: user.clone(),
-            amount: 500_000,
-            expires_at_ledger: 0,
-            status: TradeStatus::Filled,
-        };
-        env.storage()
-            .persistent()
-            .set(&StorageKey::TradeOrder(2u64), &order);
-    });
+    StellarAssetClient::new(&env, &token_a).mint(&exec_id, &1_000_000_000);
 
     env.ledger().with_mut(|l| l.sequence_number = 200);
 
@@ -557,8 +554,6 @@ fn expire_trade_filled_returns_error() {
     });
     assert_eq!(err, Err(ContractError::TradeAlreadyFilled));
 }
-
-// ── cancel_copy_trade tests ───────────────────────────────────────────────────
 
 #[test]
 fn cancel_copy_trade_success() {
@@ -601,6 +596,7 @@ fn cancel_copy_trade_unauthorized() {
 fn cancel_copy_trade_not_found() {
     let (env, exec_id, _portfolio_id, user, token_a, token_b, _) = setup_cancel(1_000_000);
     let exec = TradeExecutorContractClient::new(&env, &exec_id);
+    let _ = exec;
 
     let err = env.as_contract(&exec_id, || {
         TradeExecutorContract::cancel_copy_trade(
@@ -634,33 +630,4 @@ fn cancel_copy_trade_pnl_calculation() {
             .unwrap_or(false)
     });
     assert!(found, "TradeCancelled event not emitted");
-}
-
-// ── Reentrancy guard tests ────────────────────────────────────────────────────
-
-#[test]
-fn lock_cleared_after_successful_execution() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let admin = Address::generate(&env);
-    let user = Address::generate(&env);
-    let token = sac_token(&env);
-    let portfolio_id = env.register(MockUserPortfolio, ());
-    let exec_id = env.register(TradeExecutorContract, ());
-
-    let exec = TradeExecutorContractClient::new(&env, &exec_id);
-    exec.initialize(&admin);
-    exec.set_user_portfolio(&portfolio_id);
-
-    let per = TRADE_AMOUNT + DEFAULT_ESTIMATED_COPY_TRADE_FEE;
-    StellarAssetClient::new(&env, &token).mint(&user, &(per * 3));
-
-    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT);
-    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT);
-
-    assert_eq!(
-        MockUserPortfolioClient::new(&env, &portfolio_id).get_open_position_count(&user),
-        2
-    );
 }
