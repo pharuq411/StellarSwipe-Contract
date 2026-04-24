@@ -943,7 +943,6 @@ fn test_revoke_authorization() {
         storage::revoke_user_authorization(&env, &user);
 
         AutoTradeContract::revoke_authorization(env.clone(), user.clone()).unwrap();
-
         let config = AutoTradeContract::get_auth_config(env.clone(), user.clone());
         assert!(config.is_none());
     });
