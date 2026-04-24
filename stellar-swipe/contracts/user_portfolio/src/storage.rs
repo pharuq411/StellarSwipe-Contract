@@ -10,4 +10,6 @@ pub enum DataKey {
     NextPositionId,
     Position(u64),
     UserPositions(Address),
+    /// Registered TradeExecutor contract allowed to call `close_position_keeper`.
+    TradeExecutor,
 }

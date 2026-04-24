@@ -27,6 +27,21 @@ use stellar_swipe_common::SECONDS_PER_DAY;
 #[cfg(test)]
 mod test;
 
+/// Compute the fee charged to a trader using **floor (truncating) division**.
+///
+/// `fee = floor(trade_amount * fee_rate_bps / 10_000)`
+///
+/// This is **user-favorable**: the trader is never charged more than their exact
+/// pro-rata fee.  The sub-unit remainder stays with the trader and is not
+/// retained by the contract, so no unwithdrawable dust accumulates.
+///
+/// Returns `None` on arithmetic overflow.
+pub fn fee_amount_floor(trade_amount: i128, fee_rate_bps: u32) -> Option<i128> {
+    trade_amount
+        .checked_mul(fee_rate_bps as i128)?
+        .checked_div(10_000)
+}
+
 #[contract]
 pub struct FeeCollector;
 
@@ -100,15 +115,15 @@ impl FeeCollector {
                 queued_at,
             },
         );
-        WithdrawalQueued {
-            recipient: recipient.clone(),
-            token: token.clone(),
-            amount,
-            available_at: queued_at
-                .checked_add(SECONDS_PER_DAY)
-                .ok_or(ContractError::ArithmeticOverflow)?,
-        }
-        .publish(&env);
+        emit_withdrawal_queued(
+            &env,
+            EvtWithdrawalQueued {
+                recipient: recipient.clone(),
+                token: token.clone(),
+                amount,
+                available_at: queued_at + SECONDS_PER_DAY,
+            },
+        );
         Ok(())
     }
 
@@ -154,13 +169,15 @@ impl FeeCollector {
         set_treasury_balance(&env, &token, new_balance);
         remove_queued_withdrawal(&env);
 
-        TreasuryWithdrawal {
-            recipient: recipient.clone(),
-            token: token.clone(),
-            amount,
-            remaining_balance: new_balance,
-        }
-        .publish(&env);
+        emit_treasury_withdrawal(
+            &env,
+            EvtTreasuryWithdrawal {
+                recipient: recipient.clone(),
+                token: token.clone(),
+                amount,
+                remaining_balance: new_balance,
+            },
+        );
 
         Ok(())
     }
@@ -193,12 +210,14 @@ impl FeeCollector {
         let old_rate = get_fee_rate(&env);
         set_fee_rate_storage(&env, new_rate_bps);
 
-        FeeRateUpdated {
-            old_rate,
-            new_rate: new_rate_bps,
-            updated_by: admin,
-        }
-        .publish(&env);
+        emit_fee_rate_updated(
+            &env,
+            EvtFeeRateUpdated {
+                old_rate,
+                new_rate: new_rate_bps,
+                updated_by: admin,
+            },
+        );
 
         Ok(())
     }
@@ -243,13 +262,20 @@ impl FeeCollector {
         }
 
         let fee_rate = rebates::get_fee_rate_for_user(&env, &trader);
-        // ROUNDING STRATEGY: user-paid fee truncates (rounds down) — user-favorable.
-        // Integer division in Rust truncates toward zero, so the user is never overcharged.
-        // Any sub-stroope remainder is intentionally discarded; it does not accumulate in
-        // the contract because it is never credited to any balance.
-        let fee_amount = trade_amount
-            .checked_mul(fee_rate as i128)
-            .and_then(|amount| amount.checked_div(10_000))
+
+        // Rounding strategy (documented):
+        //   fee = floor(trade_amount * fee_rate / 10_000)
+        //
+        // Floor (truncation) is user-favorable: the trader is never charged more
+        // than their exact pro-rata fee.  The sub-unit remainder stays with the
+        // trader and is NOT retained by the contract, so no unwithdrawable dust
+        // accumulates in the treasury.
+        //
+        // Example: trade_amount=9999, fee_rate=30 bps
+        //   exact fee = 9999 * 30 / 10_000 = 29.997
+        //   charged   = 29  (floor, user-favorable)
+        //   dust      = 0   (remainder stays with trader, not in contract)
+        let fee_amount = fee_amount_floor(trade_amount, fee_rate)
             .ok_or(ContractError::ArithmeticOverflow)?;
 
         if fee_amount <= 0 {
@@ -293,6 +319,17 @@ impl FeeCollector {
 
         rebates::record_trade_volume(&env, &trader, &trade_asset, trade_amount)?;
 
+        emit_fee_collected(
+            &env,
+            EvtFeeCollected {
+                trader: trader.clone(),
+                token: token.clone(),
+                trade_amount,
+                fee_amount,
+                fee_rate_bps: fee_rate,
+            },
+        );
+
         Ok(fee_amount)
     }
 
@@ -315,12 +352,14 @@ impl FeeCollector {
             set_pending_fees(&env, &provider, &token, 0);
         }
 
-        FeesClaimed {
-            provider: provider.clone(),
-            token: token.clone(),
-            amount,
-        }
-        .publish(&env);
+        emit_fees_claimed(
+            &env,
+            EvtFeesClaimed {
+                provider: provider.clone(),
+                token: token.clone(),
+                amount,
+            },
+        );
 
         Ok(amount)
     }

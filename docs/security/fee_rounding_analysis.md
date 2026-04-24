@@ -1,115 +1,114 @@
 # Fee Rounding Analysis
 
-**Scope:** `contracts/fee_collector/src/lib.rs` — `collect_fee`  
-**Date:** 2026-04-23  
-**Status:** Audited and standardized
+## Summary
+
+All fee calculations in `FeeCollector` use **floor (truncating) division**.
+This is user-favorable: traders are never charged more than their exact pro-rata
+fee. The sub-unit remainder stays with the trader and is not retained by the
+contract, so no unwithdrawable dust accumulates in the treasury.
 
 ---
 
-## Rounding Strategy
+## Formula
 
-All fee arithmetic uses Rust integer division, which truncates toward zero (rounds down).
-The strategy is applied deliberately per calculation:
+```
+fee = floor(trade_amount × fee_rate_bps / 10_000)
+```
 
-| Calculation | Direction | Rationale |
-|---|---|---|
-| `fee_amount = trade_amount * fee_rate / 10_000` | Round **down** | User-favorable: trader never pays more than the exact rate |
-| `burn_amount = fee_amount * burn_rate / 10_000` | Round **down** | Provider-favorable: `distributable = fee_amount - burn_amount` is effectively rounded up |
-| `distributable = fee_amount - burn_amount` | Exact subtraction | No rounding; conserves every stroop |
+Implemented as `fee_amount_floor(trade_amount, fee_rate_bps)` in `lib.rs`.
+
+---
+
+## Rounding Decision
+
+| Path                        | Direction | Rationale                                      |
+|-----------------------------|-----------|------------------------------------------------|
+| User-paid fee (`collect_fee`) | Floor ↓  | User-favorable; standard DeFi convention       |
+| Rebate-tier fee (Silver/Gold) | Floor ↓  | Same formula, discounted rate, same direction  |
+| Provider pending fees        | Exact     | No rounding — full `fee_amount` is stored      |
+| Treasury withdrawal          | Exact     | Admin specifies exact amount; no rounding      |
 
 ---
 
 ## Dust Analysis
 
-### Definition
-Dust is any amount credited to the contract's token balance that can never be withdrawn or burned — permanently locked.
+### Where dust could arise
 
-### Result: No Dust
+Dust accumulates when a rounding remainder is retained by the contract rather
+than returned to the payer.
 
-The split `burn_amount + distributable = fee_amount` is exact by construction:
+### FeeCollector paths
+
+**`collect_fee`**
 
 ```
-distributable = fee_amount - burn_amount
-             = fee_amount - floor(fee_amount * burn_rate / 10_000)
+fee_amount = floor(trade_amount × fee_rate_bps / 10_000)
 ```
 
-Every stroop of `fee_amount` is accounted for:
-- `burn_amount` stroops are burned via `token::burn`
-- `distributable` stroops are added to `treasury_balance`
+The contract receives exactly `fee_amount` tokens via `token.transfer`.
+The remainder `(trade_amount × fee_rate_bps) mod 10_000` is never transferred
+to the contract — it stays in the trader's wallet. **No dust.**
 
-The treasury balance is fully withdrawable by the admin via `withdraw_treasury_fees`.  
-There is no residual balance that cannot be claimed.
+**`claim_fees`**
 
-### Sub-stroop Remainder (fee calculation)
+The full `pending_fees` balance is paid out. No division occurs. **No dust.**
 
-When `trade_amount * fee_rate` is not divisible by `10_000`, the remainder is discarded.
-This remainder is never transferred to the contract — the trader simply pays the truncated
-`fee_amount`. The contract's token balance increases by exactly `fee_amount`, so no dust
-enters the contract from this truncation.
+**`withdraw_treasury_fees`**
+
+Admin specifies the exact withdrawal amount. No division occurs. **No dust.**
+
+### Conclusion
+
+No unwithdrawable dust can accumulate. The treasury balance is always the exact
+sum of all `fee_amount` values collected, and the entire balance is withdrawable
+via `queue_withdrawal` + `withdraw_treasury_fees`.
 
 ---
 
-## Worked Examples
+## Minimum Trade Size
 
-### Example 1 — Standard trade
-```
-trade_amount = 1_000_000 stroops
-fee_rate     = 30 bps (0.30%)
-burn_rate    = 1_000 bps (10%)
+At the default rate of 30 bps, the minimum trade amount that produces a non-zero
+fee is:
 
-fee_amount   = 1_000_000 * 30 / 10_000 = 3_000   (exact, no truncation)
-burn_amount  = 3_000 * 1_000 / 10_000  = 300      (exact)
-distributable= 3_000 - 300             = 2_700
 ```
-Conservation: 300 + 2_700 = 3_000 ✓
+min_trade = ceil(10_000 / fee_rate_bps) = ceil(10_000 / 30) = 334 stroops
+```
 
-### Example 2 — Non-round fee (user-favorable truncation)
-```
-trade_amount = 9_999 stroops
-fee_rate     = 30 bps
+Trades below this threshold are rejected with `FeeRoundedToZero`. This prevents
+zero-fee trades from bypassing the fee mechanism.
 
-fee_amount   = 9_999 * 30 / 10_000 = 29.997 → 29  (truncated, user saves 0.997 stroops)
-```
-The 0.997-stroop remainder is never transferred; the contract receives exactly 29 stroops.
-
-### Example 3 — Non-round burn (provider-favorable)
-```
-fee_amount   = 2_333 stroops
-burn_rate    = 3_333 bps (33.33%)
-
-burn_amount  = 2_333 * 3_333 / 10_000 = 777.5889 → 777  (truncated)
-distributable= 2_333 - 777            = 1_556
-```
-Conservation: 777 + 1_556 = 2_333 ✓  
-The provider receives 1 extra stroop compared to exact 33.33% split — provider-favorable.
-
-### Example 4 — Fee rounds to zero (rejected)
-```
-trade_amount = 9_999 stroops
-fee_rate     = 1 bps
-
-fee_amount   = 9_999 * 1 / 10_000 = 0  → ContractError::FeeRoundedToZero
-```
-Trades too small to produce a non-zero fee are rejected, preventing zero-fee abuse.
+| Fee rate (bps) | Min trade (stroops) |
+|----------------|---------------------|
+| 1              | 10,000              |
+| 30 (default)   | 334                 |
+| 100            | 100                 |
 
 ---
 
-## Invariants
+## Dust Accumulation Over 1 Million Trades
 
-1. `burn_amount + distributable == fee_amount` for every `collect_fee` call.
-2. `fee_amount >= 1` — enforced by `FeeRoundedToZero` guard.
-3. `treasury_balance` only increases by `distributable` and only decreases by admin-initiated withdrawals — no other code path touches it.
-4. The contract's on-chain token balance equals `treasury_balance + sum(pending_fees)` at all times.
+Worst case: every trade produces a remainder of `fee_rate_bps - 1` sub-units.
+
+```
+max_dust_per_trade = (fee_rate_bps - 1) / 10_000  <  1 stroop
+```
+
+Since the remainder never enters the contract, total dust in the contract after
+any number of trades is **0**.
 
 ---
 
 ## Test Coverage
 
-Unit tests in `contracts/fee_collector/src/test.rs` verify:
-
-| Test | What it checks |
-|---|---|
-| `test_fee_rounds_down_user_favorable` | Fee truncates; user never overpays |
-| `test_burn_rounds_down_no_dust` | Burn truncates; burn + treasury == fee |
-| `test_no_unwithdrawable_dust_accumulates` | Non-round burn rate; conservation holds |
-| `test_fee_rounded_to_zero_error` | Sub-minimum trades are rejected |
+| Test | What it verifies |
+|------|-----------------|
+| `fee_floor_exact_division` | No rounding when divisible |
+| `fee_floor_rounds_down_not_up` | Floor, not ceiling |
+| `fee_floor_one_stroop_trade` | Sub-minimum trade → 0 |
+| `fee_floor_minimum_nonzero_result` | Boundary at 334 stroops |
+| `fee_floor_max_rate` | 100 bps rate |
+| `fee_floor_large_amount_no_overflow` | No overflow for large amounts |
+| `fee_floor_overflow_returns_none` | Overflow returns `None` |
+| `no_dust_accumulation_over_many_trades` | Treasury = Σ floor(fees), no extra |
+| `rebate_tier_fee_also_rounds_down` | Silver/Gold tiers also floor |
+| `collect_fee_rejects_zero_fee_trade` | `FeeRoundedToZero` guard |

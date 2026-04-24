@@ -67,6 +67,19 @@ impl UserPortfolio {
         env.storage().instance().set(&DataKey::Oracle, &oracle);
     }
 
+    /// Admin: register the TradeExecutor contract that is allowed to call
+    /// `close_position_keeper` on behalf of keepers.
+    pub fn set_trade_executor(env: Env, trade_executor: Address) {
+        Self::require_admin(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::TradeExecutor, &trade_executor);
+    }
+
+    pub fn get_trade_executor(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::TradeExecutor)
+    }
+
     pub fn set_oracle_asset_pair(env: Env, asset_pair: u32) {
         Self::require_admin(&env);
         env.storage()
@@ -168,11 +181,105 @@ impl UserPortfolio {
             } else {
                 0
             };
-            env.events().publish(
-                (Symbol::new(&env, "TradeShareable"), user.clone()),
-                (position_id, asset_pair, pos.entry_price, exit_price, pnl_bps, signal_provider, signal_id),
+            shared::events::emit_trade_shareable(
+                env,
+                shared::events::EvtTradeShareable {
+                    user: user.clone(),
+                    position_id,
+                    asset_pair,
+                    entry_price: pos.entry_price,
+                    exit_price,
+                    pnl_bps,
+                    signal_provider,
+                    signal_id,
+                },
             );
         }
+    }
+
+    /// Keeper-callable position close: used by TradeExecutor for stop-loss / take-profit
+    /// triggers. Does NOT require user signature; instead verifies that the caller is
+    /// the registered TradeExecutor contract.
+    ///
+    /// ## Auth model
+    /// - `caller` must be the registered TradeExecutor address (set by admin via
+    ///   `set_trade_executor`). The caller must sign the transaction (i.e. the
+    ///   TradeExecutor contract itself is the transaction source or sub-invocation
+    ///   authoriser).
+    /// - No user signature required (keeper pattern).
+    ///
+    /// ## Parameters
+    /// - `caller`: must equal the registered TradeExecutor
+    /// - `user`: position owner
+    /// - `position_id`: position to close
+    /// - `asset_pair`: asset pair for event emission (informational)
+    ///
+    /// Realized P&L is set to 0 (keeper closes do not calculate P&L; that is done
+    /// off-chain or in a separate settlement step).
+    pub fn close_position_keeper(
+        env: Env,
+        caller: Address,
+        user: Address,
+        position_id: u64,
+        asset_pair: u32,
+    ) {
+        // Require the caller to authorise this call.
+        caller.require_auth();
+
+        // Verify caller is the registered TradeExecutor.
+        let trade_executor: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::TradeExecutor)
+            .expect("trade executor not set");
+        if caller != trade_executor {
+            panic!("unauthorized: only trade executor can call close_position_keeper");
+        }
+
+        // Verify position exists and belongs to user.
+        let key = DataKey::UserPositions(user.clone());
+        let list: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut found = false;
+        for i in 0..list.len() {
+            if let Some(pid) = list.get(i) {
+                if pid == position_id {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if !found {
+            panic!("position not found for user");
+        }
+
+        let pkey = DataKey::Position(position_id);
+        let mut pos: Position = env
+            .storage()
+            .persistent()
+            .get(&pkey)
+            .expect("position missing");
+        if pos.status != PositionStatus::Open {
+            panic!("position not open");
+        }
+
+        // Close position with zero P&L (keeper closes don't calculate P&L).
+        pos.status = PositionStatus::Closed;
+        pos.realized_pnl = 0;
+        env.storage().persistent().set(&pkey, &pos);
+
+        // Emit event for keeper close (no TradeShareable since pnl=0).
+        shared::events::emit_position_closed_by_keeper(
+            env,
+            shared::events::EvtPositionClosedByKeeper {
+                user: user.clone(),
+                position_id,
+                asset_pair,
+            },
+        );
     }
 
     /// Portfolio P&L including open positions when oracle price is available.
@@ -482,5 +589,55 @@ mod tests {
         let pnl = client.get_pnl(&user);
         // checked_mul overflows → roi_basis_points returns 0
         assert_eq!(pnl.roi_bps, 0);
+    }
+
+    // ── Event format tests ────────────────────────────────────────────────────
+
+    fn last_topics(env: &Env) -> (soroban_sdk::Symbol, soroban_sdk::Symbol) {
+        use soroban_sdk::testutils::Events;
+        let events = env.events().all();
+        let e = events.last().unwrap();
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1;
+        let t0 = soroban_sdk::Symbol::try_from(topics.get(0).unwrap()).unwrap();
+        let t1 = soroban_sdk::Symbol::try_from(topics.get(1).unwrap()).unwrap();
+        (t0, t1)
+    }
+
+    #[test]
+    fn trade_shareable_event_has_two_topic_format() {
+        let env = Env::default();
+        let (user, portfolio_id, _) = setup_portfolio(&env, true, 100);
+        let client = UserPortfolioClient::new(&env, &portfolio_id);
+        let provider = dummy_provider(&env);
+        client.open_position(&user, &100, &1_000);
+        client.close_position(&user, &1, &200, &120i128, &42u32, &provider, &7u64);
+        let (contract, event) = last_topics(&env);
+        assert_eq!(contract, soroban_sdk::Symbol::new(&env, "user_portfolio"));
+        assert_eq!(event, soroban_sdk::Symbol::new(&env, "trade_shareable"));
+    }
+
+    #[test]
+    fn subscription_created_event_has_two_topic_format() {
+        use soroban_sdk::testutils::Ledger;
+        use soroban_sdk::token::StellarAssetClient;
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        let admin = Address::generate(&env);
+        let provider = Address::generate(&env);
+        let subscriber = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let portfolio_id = env.register_contract(None, UserPortfolio);
+        let client = UserPortfolioClient::new(&env, &portfolio_id);
+        client.initialize(&admin, &oracle);
+        let token = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&subscriber, &1_000_000i128);
+        client.set_provider_subscription_terms(&provider, &token, &10_000i128);
+        client.subscribe_to_provider(&subscriber, &provider, &7u32);
+        let (contract, event) = last_topics(&env);
+        assert_eq!(contract, soroban_sdk::Symbol::new(&env, "user_portfolio"));
+        assert_eq!(event, soroban_sdk::Symbol::new(&env, "subscription_created"));
     }
 }
