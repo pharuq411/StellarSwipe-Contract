@@ -11,6 +11,7 @@ members = [
   "contracts/shared",
   "contracts/fee_collector",
   "contracts/user_portfolio",
+  "contracts/integration_tests",
 ]
 
 [workspace.dependencies]
