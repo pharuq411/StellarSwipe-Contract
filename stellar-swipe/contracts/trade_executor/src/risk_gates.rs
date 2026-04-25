@@ -17,6 +17,9 @@ pub const MAX_POSITION_PCT_BPS: u32 = 2_000;
 /// Default estimated fee budget (in token smallest units) included in the balance check.
 pub const DEFAULT_ESTIMATED_COPY_TRADE_FEE: i128 = 500_000;
 
+/// Maximum number of trades allowed in a single `batch_execute` call.
+pub const MAX_BATCH_SIZE: u32 = 10;
+
 /// Batched portfolio entrypoint: atomically validates the position cap and records the
 /// copy position in one cross-contract call, replacing the old two-call pattern
 /// (`get_open_position_count` + `record_copy_position`).

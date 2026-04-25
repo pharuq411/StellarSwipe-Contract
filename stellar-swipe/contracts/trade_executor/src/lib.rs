@@ -1,6 +1,7 @@
 #![no_std]
 
 mod errors;
+pub mod keeper;
 pub mod risk_gates;
 pub mod triggers;
 pub mod sdex;
@@ -8,7 +9,7 @@ pub mod sdex;
 use errors::{ContractError, InsufficientBalanceDetail};
 use risk_gates::{
     check_user_balance, resolve_trade_amount, validate_and_record_position,
-    DEFAULT_ESTIMATED_COPY_TRADE_FEE,
+    DEFAULT_ESTIMATED_COPY_TRADE_FEE, MAX_BATCH_SIZE,
 };
 use sdex::{execute_sdex_swap, min_received_from_slippage};
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, IntoVal, Symbol, Val, Vec};
@@ -37,6 +38,25 @@ pub enum StorageKey {
 
 /// Temporary-storage key for the reentrancy lock on `execute_copy_trade`.
 const EXECUTION_LOCK: &str = "ExecLock";
+
+/// A single trade input for [`TradeExecutorContract::batch_execute`].
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchTradeInput {
+    pub user: Address,
+    pub token: Address,
+    pub amount: i128,
+}
+
+/// Per-trade outcome returned by [`TradeExecutorContract::batch_execute`].
+/// `ok = true` means the trade succeeded; `ok = false` means it failed with `error_code`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchTradeResult {
+    pub ok: bool,
+    /// `ContractError` discriminant when `ok == false`; 0 when `ok == true`.
+    pub error_code: u32,
+}
 
 #[contract]
 pub struct TradeExecutorContract;
@@ -193,7 +213,7 @@ impl TradeExecutorContract {
     ) {
         user.require_auth();
         triggers::set_take_profit(&env, &user, trade_id, take_profit_price);
-        register_watch(&env, &user, trade_id, asset_pair);
+        keeper::register_watch(&env, &user, trade_id, asset_pair);
     }
 
     pub fn check_and_trigger_take_profit(
@@ -448,7 +468,46 @@ impl TradeExecutorContract {
 
         Ok(())
     }
+
+    /// Execute a batch of copy trades. Each trade is attempted independently;
+    /// a failure in one trade does NOT roll back successful trades.
+    ///
+    /// Returns a `Vec<BatchTradeResult>` with one entry per input trade, in order.
+    ///
+    /// # Errors
+    /// - [`ContractError::InvalidAmount`] — batch is empty or exceeds `MAX_BATCH_SIZE`.
+    pub fn batch_execute(
+        env: Env,
+        trades: Vec<BatchTradeInput>,
+    ) -> Result<Vec<BatchTradeResult>, ContractError> {
+        let len = trades.len();
+        if len == 0 || len > MAX_BATCH_SIZE {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let mut results: Vec<BatchTradeResult> = Vec::new(&env);
+
+        for i in 0..len {
+            let trade = trades.get(i).unwrap();
+            let outcome = Self::execute_copy_trade(
+                env.clone(),
+                trade.user,
+                trade.token,
+                trade.amount,
+                None,
+            );
+            let result = match outcome {
+                Ok(()) => BatchTradeResult { ok: true, error_code: 0 },
+                Err(e) => BatchTradeResult { ok: false, error_code: e as u32 },
+            };
+            results.push_back(result);
+        }
+
+        Ok(results)
+    }
 }
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod tests;

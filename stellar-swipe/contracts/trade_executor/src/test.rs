@@ -282,6 +282,7 @@ fn execute_copy_trade_requires_user_auth() {
             user.clone(),
             token.clone(),
             TRADE_AMOUNT,
+            None,
         )
     });
     // Without mock_all_auths the require_auth() panics, surfaced as an error.
@@ -353,7 +354,7 @@ fn reentrant_call_returns_reentrancy_detected() {
     ReentrantPortfolioClient::new(&env, &portfolio_id).set_executor(&exec_id);
     ReentrantPortfolioClient::new(&env, &portfolio_id).set_user(&user);
 
-    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT);
+    exec.execute_copy_trade(&user, &token, &TRADE_AMOUNT, &None::<u32>);
 
     assert!(
         ReentrantPortfolioClient::new(&env, &portfolio_id).was_blocked(),
@@ -761,11 +762,12 @@ fn cancel_copy_trade_third_party_rejected() {
 
 fn last_event_topics(env: &Env) -> (soroban_sdk::Symbol, soroban_sdk::Symbol) {
     use soroban_sdk::testutils::Events;
+    use soroban_sdk::TryFromVal;
     let events = env.events().all();
     let e = events.last().unwrap();
     let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1;
-    let t0 = soroban_sdk::Symbol::try_from(topics.get(0).unwrap()).unwrap();
-    let t1 = soroban_sdk::Symbol::try_from(topics.get(1).unwrap()).unwrap();
+    let t0 = soroban_sdk::Symbol::try_from_val(env, &topics.get(0).unwrap()).unwrap();
+    let t1 = soroban_sdk::Symbol::try_from_val(env, &topics.get(1).unwrap()).unwrap();
     (t0, t1)
 }
 

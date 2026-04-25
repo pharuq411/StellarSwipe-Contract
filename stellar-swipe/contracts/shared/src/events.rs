@@ -22,7 +22,7 @@
 //! (e.g. `TradeExecuted`, `StopLossTriggered`). One-time events such as
 //! `ContractInitialized` are **not** wrapped — they are emitted directly.
 
-use soroban_sdk::{contracttype, Env, Symbol};
+use soroban_sdk::{contracttype, Address, Env, String, Symbol};
 
 /// Discriminant for events that may be emitted more than once per entity.
 ///
@@ -76,6 +76,198 @@ pub fn emit_once<F: FnOnce()>(
     env.storage().temporary().extend_ttl(&key, 1, 1);
 
     true
+}
+
+// ── Event structs ─────────────────────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvtTradeCancelled {
+    pub user: Address,
+    pub trade_id: u64,
+    pub exit_price: i128,
+    pub realized_pnl: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvtStopLossTriggered {
+    pub user: Address,
+    pub trade_id: u64,
+    pub stop_loss_price: i128,
+    pub current_price: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvtTakeProfitTriggered {
+    pub user: Address,
+    pub trade_id: u64,
+    pub take_profit_price: i128,
+    pub current_price: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvtTradeShareable {
+    pub user: Address,
+    pub position_id: u64,
+    pub asset_pair: u32,
+    pub entry_price: i128,
+    pub exit_price: i128,
+    pub pnl_bps: i64,
+    pub signal_provider: Address,
+    pub signal_id: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvtPositionClosedByKeeper {
+    pub user: Address,
+    pub position_id: u64,
+    pub asset_pair: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvtSubscriptionCreated {
+    pub user: Address,
+    pub provider: Address,
+    pub expires_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvtSignalAdopted {
+    pub signal_id: u64,
+    pub adopter: Address,
+    pub new_count: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvtSignalEdited {
+    pub signal_id: u64,
+    pub provider: Address,
+    pub price: i128,
+    pub rationale_hash: String,
+    pub confidence: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvtReputationUpdated {
+    pub provider: Address,
+    pub old_score: u32,
+    pub new_score: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvtStakeChanged {
+    pub holder: Address,
+    pub amount: i128,
+    pub is_stake: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvtRewardClaimed {
+    pub beneficiary: Address,
+    pub amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvtVestingReleased {
+    pub beneficiary: Address,
+    pub amount: i128,
+}
+
+// ── Emit helpers ──────────────────────────────────────────────────────────────
+
+pub fn emit_trade_cancelled(env: &Env, evt: EvtTradeCancelled) {
+    env.events().publish(
+        (Symbol::new(env, "trade_executor"), Symbol::new(env, "trade_cancelled")),
+        evt,
+    );
+}
+
+pub fn emit_stop_loss_triggered(env: &Env, evt: EvtStopLossTriggered) {
+    env.events().publish(
+        (Symbol::new(env, "trade_executor"), Symbol::new(env, "stop_loss_triggered")),
+        evt,
+    );
+}
+
+pub fn emit_take_profit_triggered(env: &Env, evt: EvtTakeProfitTriggered) {
+    env.events().publish(
+        (Symbol::new(env, "trade_executor"), Symbol::new(env, "take_profit_triggered")),
+        evt,
+    );
+}
+
+pub fn emit_trade_shareable(env: &Env, evt: EvtTradeShareable) {
+    env.events().publish(
+        (Symbol::new(env, "user_portfolio"), Symbol::new(env, "trade_shareable")),
+        evt,
+    );
+}
+
+pub fn emit_position_closed_by_keeper(env: &Env, evt: EvtPositionClosedByKeeper) {
+    env.events().publish(
+        (Symbol::new(env, "user_portfolio"), Symbol::new(env, "keeper_close")),
+        evt,
+    );
+}
+
+pub fn emit_subscription_created(env: &Env, evt: EvtSubscriptionCreated) {
+    env.events().publish(
+        (Symbol::new(env, "user_portfolio"), Symbol::new(env, "subscription_created")),
+        evt,
+    );
+}
+
+pub fn emit_signal_adopted(env: &Env, evt: EvtSignalAdopted) {
+    env.events().publish(
+        (Symbol::new(env, "signal_registry"), Symbol::new(env, "signal_adopted")),
+        evt,
+    );
+}
+
+pub fn emit_signal_edited(env: &Env, evt: EvtSignalEdited) {
+    env.events().publish(
+        (Symbol::new(env, "signal_registry"), Symbol::new(env, "signal_edited")),
+        evt,
+    );
+}
+
+pub fn emit_reputation_updated(env: &Env, evt: EvtReputationUpdated) {
+    env.events().publish(
+        (Symbol::new(env, "signal_registry"), Symbol::new(env, "reputation_updated")),
+        evt,
+    );
+}
+
+pub fn emit_stake_changed(env: &Env, evt: EvtStakeChanged) {
+    env.events().publish(
+        (Symbol::new(env, "governance"), Symbol::new(env, "stake_changed")),
+        evt,
+    );
+}
+
+pub fn emit_reward_claimed(env: &Env, evt: EvtRewardClaimed) {
+    env.events().publish(
+        (Symbol::new(env, "governance"), Symbol::new(env, "reward_claimed")),
+        evt,
+    );
+}
+
+pub fn emit_vesting_released(env: &Env, evt: EvtVestingReleased) {
+    env.events().publish(
+        (Symbol::new(env, "governance"), Symbol::new(env, "vesting_released")),
+        evt,
+    );
 }
 
 #[cfg(test)]
