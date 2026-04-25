@@ -1614,6 +1614,7 @@ fn emit_vesting_released(env: &Env, beneficiary: &Address, amount: i128) {
     shared::events::emit_vesting_released(
         env,
         shared::events::EvtVestingReleased {
+            schema_version: shared::events::SCHEMA_VERSION,
             beneficiary: beneficiary.clone(),
             amount,
         },
@@ -1625,6 +1626,7 @@ fn emit_stake_changed(env: &Env, holder: &Address, amount: i128, is_stake: bool)
     shared::events::emit_stake_changed(
         env,
         shared::events::EvtStakeChanged {
+            schema_version: shared::events::SCHEMA_VERSION,
             holder: holder.clone(),
             amount,
             is_stake,
@@ -1645,6 +1647,7 @@ fn emit_reward_claimed(env: &Env, beneficiary: &Address, amount: i128) {
     shared::events::emit_reward_claimed(
         env,
         shared::events::EvtRewardClaimed {
+            schema_version: shared::events::SCHEMA_VERSION,
             beneficiary: beneficiary.clone(),
             amount,
         },

@@ -89,6 +89,7 @@ pub fn emit_signal_adopted(env: &Env, signal_id: u64, adopter: Address, new_coun
     shared::events::emit_signal_adopted(
         env,
         shared::events::EvtSignalAdopted {
+            schema_version: shared::events::SCHEMA_VERSION,
             signal_id,
             adopter,
             new_count,
@@ -216,6 +217,7 @@ pub fn emit_signal_edited(
     shared::events::emit_signal_edited(
         env,
         shared::events::EvtSignalEdited {
+            schema_version: shared::events::SCHEMA_VERSION,
             signal_id,
             provider,
             price,
@@ -321,6 +323,7 @@ pub fn emit_reputation_updated(env: &Env, provider: Address, old_score: u32, new
     shared::events::emit_reputation_updated(
         env,
         shared::events::EvtReputationUpdated {
+            schema_version: shared::events::SCHEMA_VERSION,
             provider,
             old_score,
             new_score,

@@ -10,6 +10,23 @@ body       <EventStruct>            (a #[contracttype] struct)
 
 Event structs are defined in `contracts/shared/src/events.rs`.
 
+## Event Versioning Policy
+
+Every event struct carries a `schema_version: u32` field, starting at `1`.
+
+- **Backward-compatible additions** (new optional fields, new events): keep the same `schema_version`.
+- **Breaking changes** (field removal, type change, field rename): bump `schema_version` by 1 and document the change below.
+
+Indexers MUST check `schema_version` before deserialising event bodies to handle multiple schema generations gracefully.
+
+> **PR requirement:** Any PR that makes a breaking change to an event struct MUST bump `schema_version` and add an entry to the changelog table below.
+
+### Version changelog
+
+| Event | Version | Change |
+|---|---|---|
+| All events | 1 | Initial versioned schema — `schema_version` field added |
+
 **Stability policy:** field names and types are stable across contract versions.
 Adding new fields is allowed; removing or renaming fields requires a new event name.
 

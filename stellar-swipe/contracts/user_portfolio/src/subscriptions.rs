@@ -136,6 +136,7 @@ pub fn subscribe_to_provider(
     shared::events::emit_subscription_created(
         env,
         shared::events::EvtSubscriptionCreated {
+            schema_version: shared::events::SCHEMA_VERSION,
             user: user.clone(),
             provider: provider.clone(),
             expires_at,

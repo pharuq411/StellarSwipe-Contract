@@ -1,88 +1,37 @@
-//! Event deduplication guard (Issue #276).
+//! Shared event structs and emit helpers (Issue #275: event versioning).
 //!
-//! In retry scenarios (e.g. transaction resubmission), the same event could be
-//! emitted twice for the same state change. This module provides a lightweight
-//! nonce-based guard stored in **temporary storage** (TTL = 1 ledger) so that
-//! duplicate emissions within the same ledger are suppressed.
+//! # Versioning policy
 //!
-//! # Usage
+//! Every event struct carries a `schema_version: u32` field initialised to `1`.
 //!
-//! ```rust,ignore
-//! use shared::events::{emit_once, EventType};
+//! - **Backward-compatible additions** (new optional fields, new events): keep the
+//!   same version number.
+//! - **Breaking changes** (field removal, type change, field rename): bump
+//!   `schema_version` by 1 and document the change in `docs/events.md`.
 //!
-//! // Only emits if this (event_type, entity_id) has not been emitted this ledger.
-//! emit_once(&env, EventType::TradeExecuted, trade_id, || {
-//!     env.events().publish((Symbol::new(&env, "trade_executed"),), payload);
-//! });
-//! ```
+//! Indexers MUST check `schema_version` before deserialising event bodies so they
+//! can handle multiple schema generations gracefully.
 //!
-//! # Constraint
+//! # Event deduplication guard (Issue #276)
 //!
-//! Deduplication is only applied to events that can be emitted multiple times
-//! (e.g. `TradeExecuted`, `StopLossTriggered`). One-time events such as
-//! `ContractInitialized` are **not** wrapped — they are emitted directly.
+//! In retry scenarios the same event could be emitted twice for the same state
+//! change. [`emit_once`] provides a lightweight nonce-based guard stored in
+//! **temporary storage** (TTL = 1 ledger) that suppresses duplicate emissions
+//! within the same ledger.
 
 use soroban_sdk::{contracttype, Address, Env, String, Symbol};
 
-/// Discriminant for events that may be emitted more than once per entity.
-///
-/// Add a new variant here whenever a repeatable event needs deduplication.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EventType {
-    TradeExecuted,
-    StopLossTriggered,
-    TakeProfitTriggered,
-    SignalAdopted,
-    SignalExpired,
-    FeeCollected,
-}
+// ── Schema version constant ───────────────────────────────────────────────────
 
-/// Temporary-storage key for the deduplication nonce.
-///
-/// Keyed by `(event_type, entity_id)` so different events for the same entity
-/// (or the same event for different entities) are tracked independently.
-#[contracttype]
-#[derive(Clone)]
-pub enum StorageKey {
-    EventNonce(EventType, u64),
-}
-
-/// Emit `emit_fn` at most once per `(event_type, entity_id)` per ledger.
-///
-/// Before emitting: checks `StorageKey::EventNonce(event_type, entity_id)` in
-/// temporary storage. If the nonce already exists, the emission is skipped.
-/// After emitting: sets the nonce with a TTL of 1 ledger so it expires
-/// automatically after the current ledger closes.
-///
-/// Returns `true` if the event was emitted, `false` if it was deduplicated.
-pub fn emit_once<F: FnOnce()>(
-    env: &Env,
-    event_type: EventType,
-    entity_id: u64,
-    emit_fn: F,
-) -> bool {
-    let key = StorageKey::EventNonce(event_type, entity_id);
-
-    if env.storage().temporary().has(&key) {
-        // Already emitted this ledger — skip.
-        return false;
-    }
-
-    emit_fn();
-
-    // Set nonce with TTL = 1 ledger (expires after current ledger closes).
-    env.storage().temporary().set(&key, &true);
-    env.storage().temporary().extend_ttl(&key, 1, 1);
-
-    true
-}
+/// Current event schema version. Bump when making breaking changes to any event struct.
+pub const SCHEMA_VERSION: u32 = 1;
 
 // ── Event structs ─────────────────────────────────────────────────────────────
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvtTradeCancelled {
+    pub schema_version: u32,
     pub user: Address,
     pub trade_id: u64,
     pub exit_price: i128,
@@ -92,6 +41,7 @@ pub struct EvtTradeCancelled {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvtStopLossTriggered {
+    pub schema_version: u32,
     pub user: Address,
     pub trade_id: u64,
     pub stop_loss_price: i128,
@@ -101,6 +51,7 @@ pub struct EvtStopLossTriggered {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvtTakeProfitTriggered {
+    pub schema_version: u32,
     pub user: Address,
     pub trade_id: u64,
     pub take_profit_price: i128,
@@ -110,6 +61,7 @@ pub struct EvtTakeProfitTriggered {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvtTradeShareable {
+    pub schema_version: u32,
     pub user: Address,
     pub position_id: u64,
     pub asset_pair: u32,
@@ -123,6 +75,7 @@ pub struct EvtTradeShareable {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvtPositionClosedByKeeper {
+    pub schema_version: u32,
     pub user: Address,
     pub position_id: u64,
     pub asset_pair: u32,
@@ -131,6 +84,7 @@ pub struct EvtPositionClosedByKeeper {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvtSubscriptionCreated {
+    pub schema_version: u32,
     pub user: Address,
     pub provider: Address,
     pub expires_at: u64,
@@ -139,6 +93,7 @@ pub struct EvtSubscriptionCreated {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvtSignalAdopted {
+    pub schema_version: u32,
     pub signal_id: u64,
     pub adopter: Address,
     pub new_count: u32,
@@ -147,6 +102,7 @@ pub struct EvtSignalAdopted {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvtSignalEdited {
+    pub schema_version: u32,
     pub signal_id: u64,
     pub provider: Address,
     pub price: i128,
@@ -157,6 +113,7 @@ pub struct EvtSignalEdited {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvtReputationUpdated {
+    pub schema_version: u32,
     pub provider: Address,
     pub old_score: u32,
     pub new_score: u32,
@@ -165,6 +122,7 @@ pub struct EvtReputationUpdated {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvtStakeChanged {
+    pub schema_version: u32,
     pub holder: Address,
     pub amount: i128,
     pub is_stake: bool,
@@ -173,6 +131,7 @@ pub struct EvtStakeChanged {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvtRewardClaimed {
+    pub schema_version: u32,
     pub beneficiary: Address,
     pub amount: i128,
 }
@@ -180,6 +139,7 @@ pub struct EvtRewardClaimed {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvtVestingReleased {
+    pub schema_version: u32,
     pub beneficiary: Address,
     pub amount: i128,
 }
@@ -188,92 +148,174 @@ pub struct EvtVestingReleased {
 
 pub fn emit_trade_cancelled(env: &Env, evt: EvtTradeCancelled) {
     env.events().publish(
-        (Symbol::new(env, "trade_executor"), Symbol::new(env, "trade_cancelled")),
+        (
+            Symbol::new(env, "trade_executor"),
+            Symbol::new(env, "trade_cancelled"),
+        ),
         evt,
     );
 }
 
 pub fn emit_stop_loss_triggered(env: &Env, evt: EvtStopLossTriggered) {
     env.events().publish(
-        (Symbol::new(env, "trade_executor"), Symbol::new(env, "stop_loss_triggered")),
+        (
+            Symbol::new(env, "trade_executor"),
+            Symbol::new(env, "stop_loss_triggered"),
+        ),
         evt,
     );
 }
 
 pub fn emit_take_profit_triggered(env: &Env, evt: EvtTakeProfitTriggered) {
     env.events().publish(
-        (Symbol::new(env, "trade_executor"), Symbol::new(env, "take_profit_triggered")),
+        (
+            Symbol::new(env, "trade_executor"),
+            Symbol::new(env, "take_profit_triggered"),
+        ),
         evt,
     );
 }
 
 pub fn emit_trade_shareable(env: &Env, evt: EvtTradeShareable) {
     env.events().publish(
-        (Symbol::new(env, "user_portfolio"), Symbol::new(env, "trade_shareable")),
+        (
+            Symbol::new(env, "user_portfolio"),
+            Symbol::new(env, "trade_shareable"),
+        ),
         evt,
     );
 }
 
 pub fn emit_position_closed_by_keeper(env: &Env, evt: EvtPositionClosedByKeeper) {
     env.events().publish(
-        (Symbol::new(env, "user_portfolio"), Symbol::new(env, "keeper_close")),
+        (
+            Symbol::new(env, "user_portfolio"),
+            Symbol::new(env, "keeper_close"),
+        ),
         evt,
     );
 }
 
 pub fn emit_subscription_created(env: &Env, evt: EvtSubscriptionCreated) {
     env.events().publish(
-        (Symbol::new(env, "user_portfolio"), Symbol::new(env, "subscription_created")),
+        (
+            Symbol::new(env, "user_portfolio"),
+            Symbol::new(env, "subscription_created"),
+        ),
         evt,
     );
 }
 
 pub fn emit_signal_adopted(env: &Env, evt: EvtSignalAdopted) {
     env.events().publish(
-        (Symbol::new(env, "signal_registry"), Symbol::new(env, "signal_adopted")),
+        (
+            Symbol::new(env, "signal_registry"),
+            Symbol::new(env, "signal_adopted"),
+        ),
         evt,
     );
 }
 
 pub fn emit_signal_edited(env: &Env, evt: EvtSignalEdited) {
     env.events().publish(
-        (Symbol::new(env, "signal_registry"), Symbol::new(env, "signal_edited")),
+        (
+            Symbol::new(env, "signal_registry"),
+            Symbol::new(env, "signal_edited"),
+        ),
         evt,
     );
 }
 
 pub fn emit_reputation_updated(env: &Env, evt: EvtReputationUpdated) {
     env.events().publish(
-        (Symbol::new(env, "signal_registry"), Symbol::new(env, "reputation_updated")),
+        (
+            Symbol::new(env, "signal_registry"),
+            Symbol::new(env, "reputation_updated"),
+        ),
         evt,
     );
 }
 
 pub fn emit_stake_changed(env: &Env, evt: EvtStakeChanged) {
     env.events().publish(
-        (Symbol::new(env, "governance"), Symbol::new(env, "stake_changed")),
+        (
+            Symbol::new(env, "governance"),
+            Symbol::new(env, "stake_changed"),
+        ),
         evt,
     );
 }
 
 pub fn emit_reward_claimed(env: &Env, evt: EvtRewardClaimed) {
     env.events().publish(
-        (Symbol::new(env, "governance"), Symbol::new(env, "reward_claimed")),
+        (
+            Symbol::new(env, "governance"),
+            Symbol::new(env, "reward_claimed"),
+        ),
         evt,
     );
 }
 
 pub fn emit_vesting_released(env: &Env, evt: EvtVestingReleased) {
     env.events().publish(
-        (Symbol::new(env, "governance"), Symbol::new(env, "vesting_released")),
+        (
+            Symbol::new(env, "governance"),
+            Symbol::new(env, "vesting_released"),
+        ),
         evt,
     );
 }
 
+// ── Event deduplication guard ─────────────────────────────────────────────────
+
+/// Discriminant for events that may be emitted more than once per entity.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EventType {
+    TradeExecuted,
+    StopLossTriggered,
+    TakeProfitTriggered,
+    SignalAdopted,
+    SignalExpired,
+    FeeCollected,
+}
+
+/// Temporary-storage key for the deduplication nonce.
+#[contracttype]
+#[derive(Clone)]
+pub enum StorageKey {
+    EventNonce(EventType, u64),
+}
+
+/// Emit `emit_fn` at most once per `(event_type, entity_id)` per ledger.
+///
+/// Returns `true` if the event was emitted, `false` if it was deduplicated.
+pub fn emit_once<F: FnOnce()>(
+    env: &Env,
+    event_type: EventType,
+    entity_id: u64,
+    emit_fn: F,
+) -> bool {
+    let key = StorageKey::EventNonce(event_type, entity_id);
+
+    if env.storage().temporary().has(&key) {
+        return false;
+    }
+
+    emit_fn();
+
+    env.storage().temporary().set(&key, &true);
+    env.storage().temporary().extend_ttl(&key, 1, 1);
+
+    true
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{contract, contractimpl, symbol_short, testutils::Ledger, Env, Symbol};
+    use soroban_sdk::{contract, contractimpl, testutils::{Address as _, Events, Ledger}, Env};
 
     #[contract]
     struct TestContract;
@@ -288,7 +330,176 @@ mod tests {
         (env, id)
     }
 
-    /// First call emits the event; second call (same ledger) is deduplicated.
+    // ── schema_version field tests ────────────────────────────────────────────
+
+    #[test]
+    fn evt_trade_cancelled_has_schema_version() {
+        let env = Env::default();
+        let addr = soroban_sdk::Address::generate(&env);
+        let evt = EvtTradeCancelled {
+            schema_version: SCHEMA_VERSION,
+            user: addr,
+            trade_id: 1,
+            exit_price: 100,
+            realized_pnl: 10,
+        };
+        assert_eq!(evt.schema_version, 1);
+    }
+
+    #[test]
+    fn evt_stop_loss_triggered_has_schema_version() {
+        let env = Env::default();
+        let addr = soroban_sdk::Address::generate(&env);
+        let evt = EvtStopLossTriggered {
+            schema_version: SCHEMA_VERSION,
+            user: addr,
+            trade_id: 1,
+            stop_loss_price: 90,
+            current_price: 85,
+        };
+        assert_eq!(evt.schema_version, 1);
+    }
+
+    #[test]
+    fn evt_take_profit_triggered_has_schema_version() {
+        let env = Env::default();
+        let addr = soroban_sdk::Address::generate(&env);
+        let evt = EvtTakeProfitTriggered {
+            schema_version: SCHEMA_VERSION,
+            user: addr,
+            trade_id: 1,
+            take_profit_price: 120,
+            current_price: 125,
+        };
+        assert_eq!(evt.schema_version, 1);
+    }
+
+    #[test]
+    fn evt_trade_shareable_has_schema_version() {
+        let env = Env::default();
+        let addr = soroban_sdk::Address::generate(&env);
+        let provider = soroban_sdk::Address::generate(&env);
+        let evt = EvtTradeShareable {
+            schema_version: SCHEMA_VERSION,
+            user: addr,
+            position_id: 1,
+            asset_pair: 7,
+            entry_price: 100,
+            exit_price: 120,
+            pnl_bps: 2000,
+            signal_provider: provider,
+            signal_id: 42,
+        };
+        assert_eq!(evt.schema_version, 1);
+    }
+
+    #[test]
+    fn evt_position_closed_by_keeper_has_schema_version() {
+        let env = Env::default();
+        let addr = soroban_sdk::Address::generate(&env);
+        let evt = EvtPositionClosedByKeeper {
+            schema_version: SCHEMA_VERSION,
+            user: addr,
+            position_id: 1,
+            asset_pair: 7,
+        };
+        assert_eq!(evt.schema_version, 1);
+    }
+
+    #[test]
+    fn evt_subscription_created_has_schema_version() {
+        let env = Env::default();
+        let user = soroban_sdk::Address::generate(&env);
+        let provider = soroban_sdk::Address::generate(&env);
+        let evt = EvtSubscriptionCreated {
+            schema_version: SCHEMA_VERSION,
+            user,
+            provider,
+            expires_at: 9999,
+        };
+        assert_eq!(evt.schema_version, 1);
+    }
+
+    #[test]
+    fn evt_signal_adopted_has_schema_version() {
+        let env = Env::default();
+        let addr = soroban_sdk::Address::generate(&env);
+        let evt = EvtSignalAdopted {
+            schema_version: SCHEMA_VERSION,
+            signal_id: 1,
+            adopter: addr,
+            new_count: 5,
+        };
+        assert_eq!(evt.schema_version, 1);
+    }
+
+    #[test]
+    fn evt_signal_edited_has_schema_version() {
+        let env = Env::default();
+        let addr = soroban_sdk::Address::generate(&env);
+        let evt = EvtSignalEdited {
+            schema_version: SCHEMA_VERSION,
+            signal_id: 1,
+            provider: addr,
+            price: 100,
+            rationale_hash: soroban_sdk::String::from_str(&env, "abc"),
+            confidence: 80,
+        };
+        assert_eq!(evt.schema_version, 1);
+    }
+
+    #[test]
+    fn evt_reputation_updated_has_schema_version() {
+        let env = Env::default();
+        let addr = soroban_sdk::Address::generate(&env);
+        let evt = EvtReputationUpdated {
+            schema_version: SCHEMA_VERSION,
+            provider: addr,
+            old_score: 50,
+            new_score: 60,
+        };
+        assert_eq!(evt.schema_version, 1);
+    }
+
+    #[test]
+    fn evt_stake_changed_has_schema_version() {
+        let env = Env::default();
+        let addr = soroban_sdk::Address::generate(&env);
+        let evt = EvtStakeChanged {
+            schema_version: SCHEMA_VERSION,
+            holder: addr,
+            amount: 1000,
+            is_stake: true,
+        };
+        assert_eq!(evt.schema_version, 1);
+    }
+
+    #[test]
+    fn evt_reward_claimed_has_schema_version() {
+        let env = Env::default();
+        let addr = soroban_sdk::Address::generate(&env);
+        let evt = EvtRewardClaimed {
+            schema_version: SCHEMA_VERSION,
+            beneficiary: addr,
+            amount: 500,
+        };
+        assert_eq!(evt.schema_version, 1);
+    }
+
+    #[test]
+    fn evt_vesting_released_has_schema_version() {
+        let env = Env::default();
+        let addr = soroban_sdk::Address::generate(&env);
+        let evt = EvtVestingReleased {
+            schema_version: SCHEMA_VERSION,
+            beneficiary: addr,
+            amount: 200,
+        };
+        assert_eq!(evt.schema_version, 1);
+    }
+
+    // ── Deduplication tests ───────────────────────────────────────────────────
+
     #[test]
     fn test_deduplication_suppresses_second_emission() {
         let (env, contract_id) = setup();
@@ -308,81 +519,65 @@ mod tests {
                     .publish((Symbol::new(&env, "trade_executed"),), 42u64);
             });
 
-            assert!(emitted_first, "first emission must succeed");
-            assert!(!emitted_second, "second emission must be deduplicated");
-            assert_eq!(count, 1, "emit_fn must be called exactly once");
-
-            // Only one event in the ledger event log.
+            assert!(emitted_first);
+            assert!(!emitted_second);
+            assert_eq!(count, 1);
             assert_eq!(env.events().all().len(), 1);
         });
     }
 
-    /// Different entity_ids are tracked independently — no cross-contamination.
     #[test]
     fn test_different_entity_ids_are_independent() {
         let (env, contract_id) = setup();
 
         env.as_contract(&contract_id, || {
-            let emitted_a = emit_once(&env, EventType::TradeExecuted, 1, || {
+            let a = emit_once(&env, EventType::TradeExecuted, 1, || {
                 env.events()
                     .publish((Symbol::new(&env, "trade_executed"),), 1u64);
             });
-
-            let emitted_b = emit_once(&env, EventType::TradeExecuted, 2, || {
+            let b = emit_once(&env, EventType::TradeExecuted, 2, || {
                 env.events()
                     .publish((Symbol::new(&env, "trade_executed"),), 2u64);
             });
-
-            assert!(emitted_a);
-            assert!(emitted_b);
+            assert!(a);
+            assert!(b);
             assert_eq!(env.events().all().len(), 2);
         });
     }
 
-    /// Different event types for the same entity_id are tracked independently.
     #[test]
     fn test_different_event_types_are_independent() {
         let (env, contract_id) = setup();
 
         env.as_contract(&contract_id, || {
-            let emitted_trade = emit_once(&env, EventType::TradeExecuted, 99, || {
+            let a = emit_once(&env, EventType::TradeExecuted, 99, || {
                 env.events()
                     .publish((Symbol::new(&env, "trade_executed"),), 99u64);
             });
-
-            let emitted_stop = emit_once(&env, EventType::StopLossTriggered, 99, || {
+            let b = emit_once(&env, EventType::StopLossTriggered, 99, || {
                 env.events()
                     .publish((Symbol::new(&env, "stop_loss"),), 99u64);
             });
-
-            assert!(emitted_trade);
-            assert!(emitted_stop);
+            assert!(a);
+            assert!(b);
             assert_eq!(env.events().all().len(), 2);
         });
     }
 
-    /// Simulates a retry: same (event_type, entity_id) called twice in the same
-    /// ledger — only the first emission reaches the event log.
     #[test]
     fn test_retry_scenario_emits_single_event() {
         let (env, contract_id) = setup();
 
         env.as_contract(&contract_id, || {
-            // First attempt (original transaction)
             emit_once(&env, EventType::SignalAdopted, 7, || {
                 env.events()
                     .publish((Symbol::new(&env, "signal_adopted"),), 7u64);
             });
-
-            // Retry (resubmitted transaction, same ledger)
             emit_once(&env, EventType::SignalAdopted, 7, || {
                 env.events()
                     .publish((Symbol::new(&env, "signal_adopted"),), 7u64);
             });
-
-            // Exactly one event must appear in the log.
-            let all_events = env.events().all();
-            assert_eq!(all_events.len(), 1, "retry must not produce duplicate event");
+            assert_eq!(env.events().all().len(), 1);
         });
     }
 }

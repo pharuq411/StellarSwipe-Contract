@@ -459,6 +459,7 @@ impl TradeExecutorContract {
         shared::events::emit_trade_cancelled(
             &env,
             shared::events::EvtTradeCancelled {
+                schema_version: shared::events::SCHEMA_VERSION,
                 user: user.clone(),
                 trade_id,
                 exit_price,

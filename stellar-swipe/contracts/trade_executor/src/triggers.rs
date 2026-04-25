@@ -124,6 +124,7 @@ pub fn check_and_trigger_stop_loss(
         shared::events::emit_stop_loss_triggered(
             env,
             shared::events::EvtStopLossTriggered {
+                schema_version: shared::events::SCHEMA_VERSION,
                 user: user.clone(),
                 trade_id,
                 stop_loss_price,
@@ -168,6 +169,7 @@ pub fn check_and_trigger_take_profit(
         shared::events::emit_take_profit_triggered(
             env,
             shared::events::EvtTakeProfitTriggered {
+                schema_version: shared::events::SCHEMA_VERSION,
                 user: user.clone(),
                 trade_id,
                 take_profit_price,
