@@ -9,11 +9,6 @@
 
 <!-- If you only changed docs or non-contract code, check the first box. -->
 
-## Contract errors
-
-- [ ] This PR does **not** add, remove, renumber, or rename any `#[contracterror]` variant **or**
-- [ ] I have updated [`docs/errors.md`](docs/errors.md) so frontend error handling stays in sync.
-
 ## Checklist
 
 - [ ] Tests / `cargo check` pass for crates touched (where applicable)
