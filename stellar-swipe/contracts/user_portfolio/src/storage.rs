@@ -9,4 +9,5 @@ pub enum DataKey {
     NextPositionId,
     Position(u64),
     UserPositions(Address),
+    UserClosedPositions(Address),
 }

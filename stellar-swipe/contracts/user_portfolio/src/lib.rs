@@ -37,6 +37,13 @@ pub struct Position {
     pub realized_pnl: i128,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TradeHistoryEntry {
+    pub trade_id: u64,
+    pub position: Position,
+}
+
 #[contract]
 pub struct UserPortfolio;
 
@@ -51,7 +58,9 @@ impl UserPortfolio {
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Oracle, &oracle);
-        env.storage().instance().set(&DataKey::NextPositionId, &1u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextPositionId, &1u64);
     }
 
     pub fn set_oracle(env: Env, oracle: Address) {
@@ -71,7 +80,9 @@ impl UserPortfolio {
             .get(&DataKey::NextPositionId)
             .expect("next id");
         let next = id.checked_add(1).expect("position id overflow");
-        env.storage().instance().set(&DataKey::NextPositionId, &next);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextPositionId, &next);
 
         let pos = Position {
             entry_price,
@@ -127,6 +138,15 @@ impl UserPortfolio {
         pos.status = PositionStatus::Closed;
         pos.realized_pnl = realized_pnl;
         env.storage().persistent().set(&pkey, &pos);
+
+        let closed_key = DataKey::UserClosedPositions(user.clone());
+        let mut closed: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&closed_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        closed.push_back(position_id);
+        env.storage().persistent().set(&closed_key, &closed);
     }
 
     /// Portfolio P&L including open positions when oracle price is available.
@@ -134,8 +154,21 @@ impl UserPortfolio {
         queries::compute_get_pnl(&env, user)
     }
 
+    pub fn get_trade_history(
+        env: Env,
+        user: Address,
+        cursor: Option<u64>,
+        limit: u32,
+    ) -> Vec<TradeHistoryEntry> {
+        queries::get_trade_history(&env, user, cursor, limit)
+    }
+
     fn require_admin(env: &Env) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("admin");
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("admin");
         admin.require_auth();
     }
 }
@@ -282,5 +315,37 @@ mod tests {
         assert_eq!(pnl.total_pnl, 50);
         // invested: 1000 closed + 500 open = 1500
         assert_eq!(pnl.roi_bps, 333);
+    }
+
+    #[test]
+    fn get_trade_history_cursor_pages_all_closed_trades() {
+        let env = Env::default();
+        let (user, portfolio_id, _) = setup_portfolio(&env, true, 100);
+        let client = UserPortfolioClient::new(&env, &portfolio_id);
+
+        for _ in 0..100 {
+            let id = client.open_position(&user, &100, &1_000);
+            client.close_position(&user, &id, &(id as i128));
+        }
+
+        let mut cursor: Option<u64> = None;
+        let mut returned = Vec::new(&env);
+
+        loop {
+            let page = client.get_trade_history(&user, &cursor, &20);
+            if page.is_empty() {
+                break;
+            }
+
+            cursor = Some(page.last().unwrap().trade_id);
+            for i in 0..page.len() {
+                returned.push_back(page.get(i).unwrap().trade_id);
+            }
+        }
+
+        assert_eq!(returned.len(), 100);
+        for i in 0..100 {
+            assert_eq!(returned.get(i).unwrap(), 100 - i as u64);
+        }
     }
 }
