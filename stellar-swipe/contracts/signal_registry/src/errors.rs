@@ -25,6 +25,7 @@ pub enum AdminError {
     CircuitBreakerTriggered = 21,
     PendingAdminNotFound = 22,
     PendingAdminExpired = 23,
+    ReentrancyDetected = 24,
 }
 
 #[contracterror]

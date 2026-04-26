@@ -190,23 +190,41 @@ impl SignalRegistry {
     /// User unstakes tokens. Rate-limited to 5 changes per day.
     pub fn unstake_tokens(env: Env, provider: Address) -> Result<(), AdminError> {
         provider.require_auth();
+
+        // ── Reentrancy guard ──────────────────────────────────────────────────
+        let lock_key = soroban_sdk::Symbol::new(&env, "UnstakeLock");
+        if env
+            .storage()
+            .temporary()
+            .get::<_, bool>(&lock_key)
+            .unwrap_or(false)
+        {
+            return Err(AdminError::ReentrancyDetected);
+        }
+        env.storage().temporary().set(&lock_key, &true);
+
         let trust = reputation::get_trust_score(&env, &provider)
             .map(|d| d.score)
             .unwrap_or(0);
-        rl::check_rate_limit(&env, &provider, RLAction::StakeChange, trust)
-            .map_err(|_| AdminError::RateLimitExceeded)?;
+        let result = (|| -> Result<(), AdminError> {
+            rl::check_rate_limit(&env, &provider, RLAction::StakeChange, trust)
+                .map_err(|_| AdminError::RateLimitExceeded)?;
 
-        let mut stakes = Self::get_provider_stakes_map(&env);
-        let _ = stake::unstake(&env, &mut stakes, &provider).map_err(|e| match e {
-            stake::ContractError::InvalidStakeAmount
-            | stake::ContractError::NoStakeFound
-            | stake::ContractError::StakeLocked
-            | stake::ContractError::InsufficientStake
-            | stake::ContractError::BelowMinimumStake => AdminError::InvalidParameter,
-        })?;
-        Self::save_provider_stakes_map(&env, &stakes);
-        rl::record_action(&env, &provider, RLAction::StakeChange);
-        Ok(())
+            let mut stakes = Self::get_provider_stakes_map(&env);
+            let _ = stake::unstake(&env, &mut stakes, &provider).map_err(|e| match e {
+                stake::ContractError::InvalidStakeAmount
+                | stake::ContractError::NoStakeFound
+                | stake::ContractError::StakeLocked
+                | stake::ContractError::InsufficientStake
+                | stake::ContractError::BelowMinimumStake => AdminError::InvalidParameter,
+            })?;
+            Self::save_provider_stakes_map(&env, &stakes);
+            rl::record_action(&env, &provider, RLAction::StakeChange);
+            Ok(())
+        })();
+
+        env.storage().temporary().remove(&lock_key);
+        result
     }
 
     pub fn set_trade_fee(env: Env, caller: Address, new_fee_bps: u32) -> Result<(), AdminError> {

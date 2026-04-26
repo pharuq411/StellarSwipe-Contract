@@ -91,8 +91,11 @@ pub fn emit_signal_adopted(env: &Env, signal_id: u64, adopter: Address, new_coun
         shared::events::EvtSignalAdopted {
             schema_version: shared::events::SCHEMA_VERSION,
             signal_id,
-            adopter,
+            adopter: adopter.clone(),
             new_count,
+            user: adopter,
+            timestamp: env.ledger().timestamp(),
+            action_required: false,
         },
     );
 }

@@ -46,6 +46,9 @@ pub struct EvtStopLossTriggered {
     pub trade_id: u64,
     pub stop_loss_price: i128,
     pub current_price: i128,
+    /// Always `true` — user must review their position after a stop-loss.
+    pub action_required: bool,
+    pub timestamp: u64,
 }
 
 #[contracttype]
@@ -56,6 +59,9 @@ pub struct EvtTakeProfitTriggered {
     pub trade_id: u64,
     pub take_profit_price: i128,
     pub current_price: i128,
+    /// Always `true` — user should confirm the closed position and realised P&L.
+    pub action_required: bool,
+    pub timestamp: u64,
 }
 
 #[contracttype]
@@ -97,6 +103,24 @@ pub struct EvtSignalAdopted {
     pub signal_id: u64,
     pub adopter: Address,
     pub new_count: u32,
+    /// Address of the user who adopted the signal.
+    pub user: Address,
+    pub timestamp: u64,
+    /// `false` — signal adoption is informational, no user action required.
+    pub action_required: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvtPositionClosed {
+    pub schema_version: u32,
+    pub user: Address,
+    pub trade_id: u64,
+    pub exit_price: i128,
+    pub realized_pnl: i128,
+    pub timestamp: u64,
+    /// `false` — position closure is informational; no further action required.
+    pub action_required: bool,
 }
 
 #[contracttype]
@@ -211,6 +235,16 @@ pub fn emit_signal_adopted(env: &Env, evt: EvtSignalAdopted) {
         (
             Symbol::new(env, "signal_registry"),
             Symbol::new(env, "signal_adopted"),
+        ),
+        evt,
+    );
+}
+
+pub fn emit_position_closed(env: &Env, evt: EvtPositionClosed) {
+    env.events().publish(
+        (
+            Symbol::new(env, "trade_executor"),
+            Symbol::new(env, "position_closed"),
         ),
         evt,
     );
@@ -356,8 +390,11 @@ mod tests {
             trade_id: 1,
             stop_loss_price: 90,
             current_price: 85,
+            action_required: true,
+            timestamp: 1000,
         };
         assert_eq!(evt.schema_version, 1);
+        assert!(evt.action_required);
     }
 
     #[test]
@@ -370,8 +407,11 @@ mod tests {
             trade_id: 1,
             take_profit_price: 120,
             current_price: 125,
+            action_required: true,
+            timestamp: 1000,
         };
         assert_eq!(evt.schema_version, 1);
+        assert!(evt.action_required);
     }
 
     #[test]
@@ -427,10 +467,32 @@ mod tests {
         let evt = EvtSignalAdopted {
             schema_version: SCHEMA_VERSION,
             signal_id: 1,
-            adopter: addr,
+            adopter: addr.clone(),
             new_count: 5,
+            user: addr,
+            timestamp: 2000,
+            action_required: false,
         };
         assert_eq!(evt.schema_version, 1);
+        assert!(!evt.action_required);
+    }
+
+    #[test]
+    fn evt_position_closed_has_required_fields() {
+        let env = Env::default();
+        let addr = soroban_sdk::Address::generate(&env);
+        let evt = EvtPositionClosed {
+            schema_version: SCHEMA_VERSION,
+            user: addr,
+            trade_id: 42,
+            exit_price: 150,
+            realized_pnl: 50,
+            timestamp: 3000,
+            action_required: false,
+        };
+        assert_eq!(evt.schema_version, 1);
+        assert_eq!(evt.trade_id, 42);
+        assert!(!evt.action_required);
     }
 
     #[test]

@@ -128,3 +128,60 @@ fn test_adoption_on_inactive_signal() {
     let r = client.try_increment_adoption(&executor, &signal_id, &nonce);
     assert!(r.is_err());
 }
+
+#[test]
+fn signal_adopted_event_has_notification_fields() {
+    use soroban_sdk::testutils::{Events, Ledger};
+    use soroban_sdk::TryFromVal;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 7777);
+
+    #[allow(deprecated)]
+    let contract_id = env.register_contract(None, SignalRegistry);
+    let client = SignalRegistryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let provider = Address::generate(&env);
+    let executor = Address::generate(&env);
+    client.set_trade_executor(&admin, &executor);
+
+    let tags = Vec::new(&env);
+    let signal_id = client.create_signal(
+        &provider,
+        &String::from_str(&env, "XLM/USDC"),
+        &SignalAction::Buy,
+        &1_000_000,
+        &String::from_str(&env, "Test"),
+        &(env.ledger().timestamp() + 86400),
+        &SignalCategory::SWING,
+        &tags,
+        &RiskLevel::Medium,
+    );
+
+    client.increment_adoption(&executor, &signal_id, &1u64);
+
+    let events = env.events().all();
+    let adopted_evt = events.iter().find(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
+        if topics.len() < 2 {
+            return false;
+        }
+        let t1 = soroban_sdk::Symbol::try_from_val(&env, &topics.get(1).unwrap());
+        t1.map(|s| s == soroban_sdk::Symbol::new(&env, "signal_adopted"))
+            .unwrap_or(false)
+    });
+
+    assert!(adopted_evt.is_some(), "EvtSignalAdopted not emitted");
+    let evt: shared::events::EvtSignalAdopted =
+        shared::events::EvtSignalAdopted::try_from_val(&env, &adopted_evt.unwrap().2).unwrap();
+
+    assert_eq!(evt.signal_id, signal_id);
+    assert_eq!(evt.new_count, 1);
+    assert_eq!(evt.timestamp, 7777);
+    assert!(!evt.action_required);
+    assert_eq!(evt.schema_version, shared::events::SCHEMA_VERSION);
+}

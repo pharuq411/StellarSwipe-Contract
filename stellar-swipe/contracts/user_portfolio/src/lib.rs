@@ -185,7 +185,7 @@ impl UserPortfolio {
                 0
             };
             shared::events::emit_trade_shareable(
-                env,
+                &env,
                 shared::events::EvtTradeShareable {
                     schema_version: shared::events::SCHEMA_VERSION,
                     user: user.clone(),
@@ -199,6 +199,19 @@ impl UserPortfolio {
                 },
             );
         }
+
+        shared::events::emit_position_closed(
+            &env,
+            shared::events::EvtPositionClosed {
+                schema_version: shared::events::SCHEMA_VERSION,
+                user,
+                trade_id: position_id,
+                exit_price,
+                realized_pnl,
+                timestamp: env.ledger().timestamp(),
+                action_required: false,
+            },
+        );
     }
 
     /// Keeper-callable position close: used by TradeExecutor for stop-loss / take-profit
@@ -277,7 +290,7 @@ impl UserPortfolio {
 
         // Emit event for keeper close (no TradeShareable since pnl=0).
         shared::events::emit_position_closed_by_keeper(
-            env,
+            &env,
             shared::events::EvtPositionClosedByKeeper {
                 schema_version: shared::events::SCHEMA_VERSION,
                 user: user.clone(),
@@ -529,39 +542,47 @@ mod tests {
     /// Loss close must NOT emit TradeShareable.
     #[test]
     fn loss_close_does_not_emit_trade_shareable() {
+        use soroban_sdk::testutils::Events;
+        use soroban_sdk::TryFromVal;
         let env = Env::default();
         let (user, portfolio_id, _) = setup_portfolio(&env, true, 100);
         let client = UserPortfolioClient::new(&env, &portfolio_id);
         let provider = dummy_provider(&env);
 
         client.open_position(&user, &100, &1_000);
-        let events_before = env.events().all().len();
-        // pnl = -50 (loss) → no new event
+        // pnl = -50 (loss) → TradeShareable must NOT be emitted
         client.close_position(&user, &1, &-50, &90i128, &42u32, &provider, &7u64);
-        let events_after = env.events().all().len();
-        assert_eq!(
-            events_after, events_before,
-            "TradeShareable must not be emitted for a loss"
-        );
+        let has_trade_shareable = env.events().all().iter().any(|e| {
+            let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
+            if topics.len() < 2 { return false; }
+            soroban_sdk::Symbol::try_from_val(&env, &topics.get(1).unwrap())
+                .map(|s| s == soroban_sdk::Symbol::new(&env, "trade_shareable"))
+                .unwrap_or(false)
+        });
+        assert!(!has_trade_shareable, "TradeShareable must not be emitted for a loss");
     }
 
     /// Breakeven close (pnl == 0) must NOT emit TradeShareable.
     #[test]
     fn breakeven_close_does_not_emit_trade_shareable() {
+        use soroban_sdk::testutils::Events;
+        use soroban_sdk::TryFromVal;
         let env = Env::default();
         let (user, portfolio_id, _) = setup_portfolio(&env, true, 100);
         let client = UserPortfolioClient::new(&env, &portfolio_id);
         let provider = dummy_provider(&env);
 
         client.open_position(&user, &100, &1_000);
-        let events_before = env.events().all().len();
-        // pnl = 0 (breakeven) → no new event
+        // pnl = 0 (breakeven) → TradeShareable must NOT be emitted
         client.close_position(&user, &1, &0, &100i128, &42u32, &provider, &7u64);
-        let events_after = env.events().all().len();
-        assert_eq!(
-            events_after, events_before,
-            "TradeShareable must not be emitted for breakeven"
-        );
+        let has_trade_shareable = env.events().all().iter().any(|e| {
+            let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
+            if topics.len() < 2 { return false; }
+            soroban_sdk::Symbol::try_from_val(&env, &topics.get(1).unwrap())
+                .map(|s| s == soroban_sdk::Symbol::new(&env, "trade_shareable"))
+                .unwrap_or(false)
+        });
+        assert!(!has_trade_shareable, "TradeShareable must not be emitted for breakeven");
     }
 
     // ── Overflow / division-by-zero tests ─────────────────────────────────────
@@ -600,25 +621,39 @@ mod tests {
 
     fn last_topics(env: &Env) -> (soroban_sdk::Symbol, soroban_sdk::Symbol) {
         use soroban_sdk::testutils::Events;
+        use soroban_sdk::TryFromVal;
         let events = env.events().all();
         let e = events.last().unwrap();
         let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1;
-        let t0 = soroban_sdk::Symbol::try_from(topics.get(0).unwrap()).unwrap();
-        let t1 = soroban_sdk::Symbol::try_from(topics.get(1).unwrap()).unwrap();
+        let t0 = soroban_sdk::Symbol::try_from_val(env, &topics.get(0).unwrap()).unwrap();
+        let t1 = soroban_sdk::Symbol::try_from_val(env, &topics.get(1).unwrap()).unwrap();
         (t0, t1)
     }
 
     #[test]
     fn trade_shareable_event_has_two_topic_format() {
+        use soroban_sdk::testutils::Events;
+        use soroban_sdk::TryFromVal;
         let env = Env::default();
         let (user, portfolio_id, _) = setup_portfolio(&env, true, 100);
         let client = UserPortfolioClient::new(&env, &portfolio_id);
         let provider = dummy_provider(&env);
         client.open_position(&user, &100, &1_000);
         client.close_position(&user, &1, &200, &120i128, &42u32, &provider, &7u64);
-        let (contract, event) = last_topics(&env);
-        assert_eq!(contract, soroban_sdk::Symbol::new(&env, "user_portfolio"));
-        assert_eq!(event, soroban_sdk::Symbol::new(&env, "trade_shareable"));
+        // Find the trade_shareable event specifically (position_closed is emitted after it).
+        let shareable_evt = env.events().all().iter().find(|e| {
+            let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
+            if topics.len() < 2 { return false; }
+            soroban_sdk::Symbol::try_from_val(&env, &topics.get(1).unwrap())
+                .map(|s| s == soroban_sdk::Symbol::new(&env, "trade_shareable"))
+                .unwrap_or(false)
+        });
+        assert!(shareable_evt.is_some(), "trade_shareable event not found");
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = shareable_evt.unwrap().1.clone();
+        let t0 = soroban_sdk::Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+        let t1 = soroban_sdk::Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+        assert_eq!(t0, soroban_sdk::Symbol::new(&env, "user_portfolio"));
+        assert_eq!(t1, soroban_sdk::Symbol::new(&env, "trade_shareable"));
     }
 
     #[test]

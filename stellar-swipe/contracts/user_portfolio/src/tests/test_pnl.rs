@@ -196,3 +196,72 @@ fn multiple_positions_aggregate() {
     // roi_bps = 15 * 10_000 / 20 = 7500
     assert_eq!(pnl.roi_bps, 7_500);
 }
+
+// ── Notification event tests ──────────────────────────────────────────────────
+
+/// close_position emits EvtPositionClosed with all required notification fields.
+#[test]
+fn close_position_emits_position_closed_event() {
+    use soroban_sdk::testutils::Events;
+    use soroban_sdk::TryFromVal;
+
+    let (env, user, client) = setup(120);
+    env.ledger().with_mut(|l| l.timestamp = 5000);
+    let provider = dummy_provider(&env);
+
+    client.open_position(&user, &100, &10);
+    client.close_position(&user, &1, &20, &120i128, &0u32, &provider, &0u64);
+
+    // Find the position_closed event.
+    let events = env.events().all();
+    let pos_closed = events.iter().find(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
+        if topics.len() < 2 {
+            return false;
+        }
+        let t1 = soroban_sdk::Symbol::try_from_val(&env, &topics.get(1).unwrap());
+        t1.map(|s| s == soroban_sdk::Symbol::new(&env, "position_closed"))
+            .unwrap_or(false)
+    });
+
+    assert!(pos_closed.is_some(), "EvtPositionClosed not emitted");
+    let evt: shared::events::EvtPositionClosed =
+        shared::events::EvtPositionClosed::try_from_val(&env, &pos_closed.unwrap().2).unwrap();
+
+    assert_eq!(evt.trade_id, 1);
+    assert_eq!(evt.exit_price, 120);
+    assert_eq!(evt.realized_pnl, 20);
+    assert_eq!(evt.timestamp, 5000);
+    assert!(!evt.action_required);
+    assert_eq!(evt.schema_version, shared::events::SCHEMA_VERSION);
+}
+
+/// close_position emits EvtPositionClosed even for a loss (pnl <= 0).
+#[test]
+fn close_position_emits_position_closed_event_on_loss() {
+    use soroban_sdk::testutils::Events;
+    use soroban_sdk::TryFromVal;
+
+    let (env, user, client) = setup(80);
+    let provider = dummy_provider(&env);
+
+    client.open_position(&user, &100, &10);
+    client.close_position(&user, &1, &-20, &80i128, &0u32, &provider, &0u64);
+
+    let events = env.events().all();
+    let pos_closed = events.iter().find(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
+        if topics.len() < 2 {
+            return false;
+        }
+        let t1 = soroban_sdk::Symbol::try_from_val(&env, &topics.get(1).unwrap());
+        t1.map(|s| s == soroban_sdk::Symbol::new(&env, "position_closed"))
+            .unwrap_or(false)
+    });
+
+    assert!(pos_closed.is_some(), "EvtPositionClosed not emitted on loss");
+    let evt: shared::events::EvtPositionClosed =
+        shared::events::EvtPositionClosed::try_from_val(&env, &pos_closed.unwrap().2).unwrap();
+    assert_eq!(evt.realized_pnl, -20);
+    assert!(!evt.action_required);
+}

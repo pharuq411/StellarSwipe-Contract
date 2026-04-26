@@ -129,6 +129,8 @@ pub fn check_and_trigger_stop_loss(
                 trade_id,
                 stop_loss_price,
                 current_price,
+                action_required: true,
+                timestamp: env.ledger().timestamp(),
             },
         );
         Ok(true)
@@ -174,6 +176,8 @@ pub fn check_and_trigger_take_profit(
                 trade_id,
                 take_profit_price,
                 current_price,
+                action_required: true,
+                timestamp: env.ledger().timestamp(),
             },
         );
         Ok(true)
@@ -491,5 +495,50 @@ mod tests {
         let (contract, event) = last_topics(&env);
         assert_eq!(contract, Symbol::new(&env, "trade_executor"));
         assert_eq!(event, Symbol::new(&env, "take_profit_triggered"));
+    }
+
+    // ── Notification field tests ──────────────────────────────────────────────
+
+    fn last_event_body<T: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>(env: &Env) -> T {
+        use soroban_sdk::testutils::Events;
+        let events = env.events().all();
+        let e = events.last().unwrap();
+        T::try_from_val(env, &e.2).unwrap()
+    }
+
+    #[test]
+    fn stop_loss_event_has_action_required_true_and_timestamp() {
+        let (env, exec_id, oracle_id, _) = setup();
+        use soroban_sdk::testutils::Ledger;
+        env.ledger().with_mut(|l| l.timestamp = 12345);
+        let user = Address::generate(&env);
+        MockOracleClient::new(&env, &oracle_id).set_price(&50);
+        let exec = TradeExecutorContractClient::new(&env, &exec_id);
+        exec.set_stop_loss_price(&user, &1u64, &100);
+        exec.check_and_trigger_stop_loss(&user, &1u64, &0u32);
+        let evt: shared::events::EvtStopLossTriggered = last_event_body(&env);
+        assert!(evt.action_required);
+        assert_eq!(evt.timestamp, 12345);
+        assert_eq!(evt.trade_id, 1);
+        assert_eq!(evt.stop_loss_price, 100);
+        assert_eq!(evt.current_price, 50);
+    }
+
+    #[test]
+    fn take_profit_event_has_action_required_true_and_timestamp() {
+        let (env, exec_id, oracle_id, _) = setup();
+        use soroban_sdk::testutils::Ledger;
+        env.ledger().with_mut(|l| l.timestamp = 99999);
+        let user = Address::generate(&env);
+        MockOracleClient::new(&env, &oracle_id).set_price(&300);
+        let exec = TradeExecutorContractClient::new(&env, &exec_id);
+        exec.set_take_profit_price(&user, &2u64, &200);
+        exec.check_and_trigger_take_profit(&user, &2u64, &0u32);
+        let evt: shared::events::EvtTakeProfitTriggered = last_event_body(&env);
+        assert!(evt.action_required);
+        assert_eq!(evt.timestamp, 99999);
+        assert_eq!(evt.trade_id, 2);
+        assert_eq!(evt.take_profit_price, 200);
+        assert_eq!(evt.current_price, 300);
     }
 }

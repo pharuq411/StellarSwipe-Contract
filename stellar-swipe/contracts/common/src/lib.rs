@@ -27,3 +27,6 @@ pub use rate_limit::{
     check_rate_limit, record_action, set_config as set_rate_limit_config, ActionType, RateLimitConfig,
 };
 pub use replay_protection::{current_nonce, verify_and_commit, ReplayError};
+
+#[cfg(test)]
+mod storage_key_tests;
