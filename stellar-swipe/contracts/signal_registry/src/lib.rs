@@ -10,6 +10,7 @@ mod expiry;
 mod fees;
 mod leaderboard;
 mod performance;
+mod providers;
 mod social;
 mod stake;
 mod submission;
@@ -21,6 +22,7 @@ use admin::{
 };
 use errors::AdminError;
 pub use leaderboard::{get_leaderboard, LeaderboardMetric, ProviderLeaderboard};
+pub use providers::VerificationEligibility;
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Map, String, Vec};
 use stellar_swipe_common::{validate_asset_pair as validate_asset_pair_common, AssetPairError};
 use types::{
@@ -40,6 +42,7 @@ pub enum StorageKey {
     Signals,
     ProviderStats,
     TradeExecutions,
+    ProviderStakes,
 }
 
 #[contractimpl]
@@ -186,6 +189,19 @@ impl SignalRegistry {
         env.storage()
             .instance()
             .set(&StorageKey::ProviderStats, map);
+    }
+
+    fn get_provider_stakes_map(env: &Env) -> Map<Address, i128> {
+        env.storage()
+            .instance()
+            .get(&StorageKey::ProviderStakes)
+            .unwrap_or(Map::new(env))
+    }
+
+    fn save_provider_stakes_map(env: &Env, map: &Map<Address, i128>) {
+        env.storage()
+            .instance()
+            .set(&StorageKey::ProviderStakes, map);
     }
 
     fn validate_asset_pair(env: &Env, asset_pair: &String) -> Result<(), AdminError> {
@@ -393,6 +409,29 @@ impl SignalRegistry {
     /// Get provider performance stats (alias for get_provider_stats)
     pub fn get_provider_performance(env: Env, provider: Address) -> Option<ProviderPerformance> {
         Self::get_provider_stats(env, provider)
+    }
+
+    /// Record provider stake amount for verification checks.
+    pub fn set_provider_stake(env: Env, provider: Address, amount: i128) -> Result<(), AdminError> {
+        provider.require_auth();
+        if amount < 0 {
+            return Err(AdminError::InvalidParameter);
+        }
+
+        let mut stakes = Self::get_provider_stakes_map(&env);
+        stakes.set(provider, amount);
+        Self::save_provider_stakes_map(&env, &stakes);
+        Ok(())
+    }
+
+    /// Check whether a provider meets automated verification criteria.
+    pub fn check_verification_eligibility(env: Env, provider: Address) -> VerificationEligibility {
+        let stakes = Self::get_provider_stakes_map(&env);
+        let stats = Self::get_provider_stats_map(&env);
+        let stake = stakes.get(provider.clone()).unwrap_or(0);
+        let performance = stats.get(provider.clone()).unwrap_or_default();
+
+        providers::check_verification_eligibility(&env, provider, stake, performance)
     }
 
     /// Get leaderboard of top providers by metric
