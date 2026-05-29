@@ -18,6 +18,9 @@ pub const DEFAULT_MIN_STAKE: i128 = 100_000_000; // 100 XLM (7 decimals)
 pub const DEFAULT_TRADE_FEE_BPS: u32 = 10; // 0.1%
 pub const DEFAULT_STOP_LOSS: u32 = 15; // 15%
 pub const DEFAULT_POSITION_LIMIT: u32 = 20; // 20%
+pub const DEFAULT_BRONZE_SIGNAL_LIMIT: u32 = 5;
+pub const DEFAULT_SILVER_SIGNAL_LIMIT: u32 = 10;
+pub const DEFAULT_GOLD_SIGNAL_LIMIT: u32 = 20;
 
 #[contracttype]
 #[derive(Clone)]
@@ -38,14 +41,9 @@ pub enum AdminStorageKey {
     FeeCollectionPaused,
     PendingAdmin,
     PendingAdminExpiry,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PendingAdminTransfer {
-    pub pending_admin: Address,
-    /// Unix timestamp (seconds) after which the proposal cannot be accepted.
-    pub expires_at: u64,
+    BronzeSignalLimit,
+    SilverSignalLimit,
+    GoldSignalLimit,
 }
 
 #[contracttype]
@@ -62,6 +60,9 @@ pub struct AdminConfig {
     pub trade_fee_bps: u32,
     pub default_stop_loss: u32,
     pub default_position_limit: u32,
+    pub bronze_signal_limit: u32,
+    pub silver_signal_limit: u32,
+    pub gold_signal_limit: u32,
 }
 
 /// Initialize admin with default parameters
@@ -85,6 +86,15 @@ pub fn init_admin(env: &Env, admin: Address) -> Result<(), AdminError> {
     env.storage()
         .instance()
         .set(&AdminStorageKey::PositionLimit, &DEFAULT_POSITION_LIMIT);
+    env.storage()
+        .instance()
+        .set(&AdminStorageKey::BronzeSignalLimit, &DEFAULT_BRONZE_SIGNAL_LIMIT);
+    env.storage()
+        .instance()
+        .set(&AdminStorageKey::SilverSignalLimit, &DEFAULT_SILVER_SIGNAL_LIMIT);
+    env.storage()
+        .instance()
+        .set(&AdminStorageKey::GoldSignalLimit, &DEFAULT_GOLD_SIGNAL_LIMIT);
     env.storage()
         .instance()
         .set(&AdminStorageKey::MultiSigEnabled, &false);
@@ -534,7 +544,52 @@ pub fn get_admin_config(env: &Env) -> AdminConfig {
         trade_fee_bps: get_trade_fee(env),
         default_stop_loss: get_default_stop_loss(env),
         default_position_limit: get_default_position_limit(env),
+        bronze_signal_limit: get_bronze_signal_limit(env),
+        silver_signal_limit: get_silver_signal_limit(env),
+        gold_signal_limit: get_gold_signal_limit(env),
     }
+}
+
+pub fn set_tier_signal_limits(
+    env: &Env,
+    caller: &Address,
+    bronze: u32,
+    silver: u32,
+    gold: u32,
+) -> Result<(), AdminError> {
+    require_admin(env, caller)?;
+    caller.require_auth();
+    env.storage()
+        .instance()
+        .set(&AdminStorageKey::BronzeSignalLimit, &bronze);
+    env.storage()
+        .instance()
+        .set(&AdminStorageKey::SilverSignalLimit, &silver);
+    env.storage()
+        .instance()
+        .set(&AdminStorageKey::GoldSignalLimit, &gold);
+    Ok(())
+}
+
+pub fn get_bronze_signal_limit(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&AdminStorageKey::BronzeSignalLimit)
+        .unwrap_or(DEFAULT_BRONZE_SIGNAL_LIMIT)
+}
+
+pub fn get_silver_signal_limit(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&AdminStorageKey::SilverSignalLimit)
+        .unwrap_or(DEFAULT_SILVER_SIGNAL_LIMIT)
+}
+
+pub fn get_gold_signal_limit(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&AdminStorageKey::GoldSignalLimit)
+        .unwrap_or(DEFAULT_GOLD_SIGNAL_LIMIT)
 }
 
 // ==================== Multi-Sig Functions ====================

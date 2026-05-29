@@ -11,6 +11,45 @@ const EXECUTION_LOCK: &str = "WithdrawLock";
 /// 24 hours in seconds — grace period for providers to top up stake.
 const GRACE_PERIOD_SECS: u64 = 86_400;
 
+pub const GOLD_TIER_STAKE: i128 = 1_000_000_000;
+pub const SILVER_TIER_STAKE: i128 = GOLD_TIER_STAKE / 2;
+pub const BRONZE_TIER_STAKE: i128 = GOLD_TIER_STAKE / 10;
+
+fn stake_tier_for_amount(amount: i128) -> u32 {
+    if amount >= GOLD_TIER_STAKE {
+        3
+    } else if amount >= SILVER_TIER_STAKE {
+        2
+    } else if amount >= BRONZE_TIER_STAKE {
+        1
+    } else {
+        0
+    }
+}
+
+fn emit_provider_tier_change(
+    env: &Env,
+    provider: &Address,
+    old_tier: u32,
+    new_tier: u32,
+    stake_balance: i128,
+) {
+    if old_tier == new_tier {
+        return;
+    }
+
+    let topic = if new_tier > old_tier {
+        "provider_tier_upgraded"
+    } else {
+        "provider_tier_downgraded"
+    };
+
+    env.events().publish(
+        (Symbol::new(env, topic),),
+        (provider.clone(), old_tier, new_tier, stake_balance),
+    );
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub enum StorageKey {
@@ -214,6 +253,8 @@ impl StakeVaultContract {
         }
 
         let amount = info.balance;
+        let old_tier = stake_tier_for_amount(info.balance);
+        let new_tier = stake_tier_for_amount(0);
 
         // Zero the balance before the token transfer (checks-effects-interactions).
         stakes.set(

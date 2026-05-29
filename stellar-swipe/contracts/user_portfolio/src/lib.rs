@@ -209,6 +209,37 @@ impl UserPortfolio {
             .set(&DataKey::OracleAssetPair, &asset_pair);
     }
 
+    pub fn get_onboarding_status(env: Env, user: Address) -> OnboardingStatus {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserOnboardingStatus(user))
+            .unwrap_or(OnboardingStatus::NotStarted)
+    }
+
+    pub fn get_onboarding_milestone(env: Env, user: Address) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserOnboardingMilestone(user))
+    }
+
+    pub fn update_onboarding_status(
+        env: Env,
+        user: Address,
+        status: OnboardingStatus,
+        milestone: Option<String>,
+    ) {
+        Self::require_admin(&env);
+        env.storage()
+            .persistent()
+            .set(&DataKey::UserOnboardingStatus(user.clone()), &status);
+        if let Some(m) = milestone.clone() {
+            env.storage()
+                .persistent()
+                .set(&DataKey::UserOnboardingMilestone(user.clone()), &m);
+        }
+        onboarding::emit_onboarding_status_updated(&env, user, status, milestone);
+    }
+
     /// Opens a position for `user` (caller must be `user`). `amount` is invested notional at entry.
     pub fn open_position(env: Env, user: Address, entry_price: i128, amount: i128) -> u64 {
         user.require_auth();

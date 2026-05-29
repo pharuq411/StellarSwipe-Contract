@@ -1,6 +1,8 @@
 use soroban_sdk::{Address, Env, Map, String, BytesN};
 use crate::submission::{Action, Signal};
-use crate::types::{ProviderProfile, Outcome};
+use crate::types::{ProviderProfile, Outcome, SignalStatus};
+use crate::errors::AdminError;
+use crate::admin;
 
 /// Maximum allowed price deviation from oracle price (in basis points)
 /// 2000 = 20% deviation allowed
@@ -30,6 +32,34 @@ pub enum RationaleHashError {
 pub enum PriceReasonablenessError {
     /// Signal price deviates too much from oracle price
     PriceUnreasonable,
+}
+
+pub fn count_active_provider_signals(storage: &Map<u64, Signal>, provider: &Address) -> u32 {
+    let mut count: u32 = 0;
+    for (_signal_id, signal) in storage.iter() {
+        if signal.provider == *provider && signal.status == SignalStatus::Active {
+            count = count.saturating_add(1);
+        }
+    }
+    count
+}
+
+pub fn validate_provider_signal_limit(
+    env: &Env,
+    storage: &Map<u64, Signal>,
+    provider: &Address,
+    tier: u32,
+) -> Result<(), AdminError> {
+    let limit = match tier {
+        3 => admin::get_gold_signal_limit(env),
+        2 => admin::get_silver_signal_limit(env),
+        _ => admin::get_bronze_signal_limit(env),
+    };
+
+    if count_active_provider_signals(storage, provider) >= limit {
+        return Err(AdminError::SignalLimitExceeded);
+    }
+    Ok(())
 }
 
 /// Check if a new signal is a duplicate of an existing active signal.

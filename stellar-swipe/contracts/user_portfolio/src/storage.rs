@@ -33,6 +33,9 @@ pub enum DataKey {
     NotificationPrefs(Address),
     /// Per-user achievement list (Issue #432).
     UserAchievements(Address),
+    /// Per-user onboarding status and milestone tracking.
+    UserOnboardingStatus(Address),
+    UserOnboardingMilestone(Address),
     // Badge-related keys used by badges.rs
     UserBadges(Address),
     UserClosedTradeCount(Address),

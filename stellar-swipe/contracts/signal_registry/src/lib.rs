@@ -689,6 +689,27 @@ impl SignalRegistry {
             return Err(AdminError::Unauthorized);
         }
 
+        let provider_stake_tier = providers::get_provider_profile(env, &provider)
+            .map(|profile| profile.stake_tier)
+            .unwrap_or_else(|| {
+                let stakes = Self::get_provider_stakes_map(env);
+                let amount = stakes
+                    .get(provider.clone())
+                    .map(|info| info.amount)
+                    .unwrap_or(0);
+                if amount >= providers::GOLD_TIER_STAKE {
+                    3
+                } else if amount >= providers::GOLD_TIER_STAKE / 2 {
+                    2
+                } else if amount >= providers::GOLD_TIER_STAKE / 10 {
+                    1
+                } else {
+                    0
+                }
+            });
+
+        validation::validate_provider_signal_limit(env, &Self::get_signals_map(env), &provider, provider_stake_tier)?;
+
         // Rate limit: signal submission
         let trust = reputation::get_trust_score(env, &provider)
             .map(|d| d.score)
