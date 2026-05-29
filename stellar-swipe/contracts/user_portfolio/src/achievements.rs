@@ -51,6 +51,36 @@ fn target_for(t: AchievementType) -> u32 {
     }
 }
 
+fn achievement_type_for_quest(quest_id: u32) -> Option<AchievementType> {
+    match quest_id {
+        0 => Some(AchievementType::Trades100),
+        1 => Some(AchievementType::Profit1000Xlm),
+        2 => Some(AchievementType::Streak10Wins),
+        3 => Some(AchievementType::Followed10Providers),
+        4 => Some(AchievementType::EarlyAdopter),
+        _ => None,
+    }
+}
+
+fn get_achievement(env: &Env, user: &Address, achievement_type: AchievementType) -> Achievement {
+    let list = get_achievements(env, user);
+    for i in 0..list.len() {
+        let a = list.get_unchecked(i);
+        if a.achievement_type == achievement_type {
+            return a;
+        }
+    }
+    panic!("achievement not found");
+}
+
+pub fn verify_quest_completion(env: &Env, user: &Address, quest_id: u32) -> bool {
+    if let Some(achievement_type) = achievement_type_for_quest(quest_id) {
+        get_achievement(env, user, achievement_type).completed
+    } else {
+        false
+    }
+}
+
 const ALL_TYPES: [AchievementType; 5] = [
     AchievementType::Trades100,
     AchievementType::Profit1000Xlm,
@@ -305,5 +335,24 @@ mod tests {
             increment_progress(&env, &user, AchievementType::EarlyAdopter, 1);
         });
         assert!(!env.events().all().is_empty());
+    }
+
+    #[test]
+    fn verify_quest_completion_returns_true_when_achievement_completed() {
+        let (env, contract_id, _) = setup();
+        let user = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            increment_progress(&env, &user, AchievementType::EarlyAdopter, 1);
+            assert!(verify_quest_completion(&env, &user, 4));
+        });
+    }
+
+    #[test]
+    fn verify_quest_completion_returns_false_for_unknown_quest() {
+        let (env, contract_id, _) = setup();
+        let user = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            assert!(!verify_quest_completion(&env, &user, 999));
+        });
     }
 }

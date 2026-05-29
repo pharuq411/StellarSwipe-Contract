@@ -33,6 +33,8 @@ pub enum DataKey {
     NotificationPrefs(Address),
     /// Per-user achievement list (Issue #432).
     UserAchievements(Address),
+    /// Anchor deposit destination address by token.
+    AnchorDepositAddress(Address),
     // Badge-related keys used by badges.rs
     UserBadges(Address),
     UserClosedTradeCount(Address),

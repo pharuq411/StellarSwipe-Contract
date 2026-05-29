@@ -35,6 +35,14 @@ pub struct PnlSummary {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnchorDepositInfo {
+    pub deposit_address: Address,
+    pub token: Address,
+    pub amount_fiat: i128,
+}
+
+#[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum PositionStatus {
@@ -125,6 +133,34 @@ impl UserPortfolio {
 
     pub fn get_trade_executor(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::TradeExecutor)
+    }
+
+    /// Admin: configure an anchor deposit address for a specific token.
+    pub fn set_anchor_deposit_address(env: Env, token: Address, deposit_address: Address) {
+        Self::require_admin(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::AnchorDepositAddress(token), &deposit_address);
+    }
+
+    /// Query an anchor deposit address for a token and requested fiat amount.
+    pub fn get_anchor_deposit_address(
+        env: Env,
+        _user: Address,
+        token: Address,
+        amount_fiat: i128,
+    ) -> AnchorDepositInfo {
+        let deposit_address: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::AnchorDepositAddress(token.clone()))
+            .expect("anchor deposit address not configured for token");
+
+        AnchorDepositInfo {
+            deposit_address,
+            token,
+            amount_fiat,
+        }
     }
 
     /// Admin: set or clear the KYC-verified flag for a user.
@@ -601,6 +637,11 @@ impl UserPortfolio {
         achievements::get_achievements(&env, &user)
     }
 
+    /// Returns whether the user has completed the quest identified by `quest_id`.
+    pub fn verify_quest_completion(env: Env, user: Address, quest_id: u32) -> bool {
+        achievements::verify_quest_completion(&env, &user, quest_id)
+    }
+
     fn require_admin(env: &Env) {
         let admin: Address = env
             .storage()
@@ -1019,6 +1060,37 @@ mod migration_tests {
                 .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
         });
         assert_eq!(open_ids.len(), 0); // position 1 was closed
+    }
+}
+
+#[cfg(test)]
+mod anchor_deposit_tests {
+    use super::oracle_ok::OracleMock;
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::Env;
+
+    #[test]
+    fn get_anchor_deposit_address_returns_configured_address() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let oracle = env.register_contract(None, OracleMock);
+        let contract_id = env.register_contract(None, UserPortfolio);
+        let client = UserPortfolioClient::new(&env, &contract_id);
+        client.initialize(&admin, &oracle);
+
+        let token = Address::generate(&env);
+        let deposit_address = Address::generate(&env);
+        client.set_anchor_deposit_address(&token, &deposit_address);
+
+        let user = Address::generate(&env);
+        let info = client.get_anchor_deposit_address(&user, &token, &1_000);
+
+        assert_eq!(info.deposit_address, deposit_address);
+        assert_eq!(info.token, token);
+        assert_eq!(info.amount_fiat, 1_000);
     }
 }
 
