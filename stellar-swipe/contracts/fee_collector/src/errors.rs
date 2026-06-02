@@ -19,4 +19,8 @@ pub enum ContractError {
     FeeRoundedToZero = 13,
     BurnRateTooHigh = 14,
     DivisionByZero = 15,
+    InvalidFeeConfiguration = 16,
+    NetworkConditionInvalid = 17,
+    FailedCollectionNotFound = 18,
+    RetryLimitExceeded = 19,
 }

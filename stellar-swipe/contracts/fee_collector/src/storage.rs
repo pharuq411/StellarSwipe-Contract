@@ -1,10 +1,16 @@
-use soroban_sdk::{contracttype, Address, Env};
+use soroban_sdk::{contracttype, Address, Env, String};
+use stellar_swipe_common::Asset;
+use shared::errors::{ErrorCategory, RecoveryStrategy};
 
 pub const MAX_FEE_RATE_BPS: u32 = 100; // 1%
 pub const MIN_FEE_RATE_BPS: u32 = 1; // 0.01%
 pub const DEFAULT_FEE_RATE_BPS: u32 = 30; // 0.3%
 pub const DEFAULT_BURN_RATE_BPS: u32 = 1_000; // 10%
 pub const MAX_BURN_RATE_BPS: u32 = 10_000; // 100%
+pub const DEFAULT_NETWORK_SCORE_BPS: u32 = 0;
+pub const DEFAULT_FEE_OPTIMIZATION_MAX_RATE_BPS: u32 = 100;
+pub const DEFAULT_CONGESTION_SENSITIVITY_BPS: u32 = 50;
+pub const DEFAULT_MAX_RETRY_ATTEMPTS: u32 = 3;
 pub const LEDGERS_PER_MONTH_APPROX: u32 = 518_400; // ~30 days at ~5 seconds per ledger
 pub const SILVER_TIER_VOLUME_USD: i128 = 10_000 * 10_000_000; // $10k, 7 decimals
 pub const GOLD_TIER_VOLUME_USD: i128 = 50_000 * 10_000_000; // $50k, 7 decimals
@@ -41,6 +47,44 @@ pub enum StorageKey {
     LastRevenueShareSnapshot,
     /// Accumulated revenue share pool waiting for next distribution.
     RevenueSharePool(Address),
+    /// Latest aggregated network score for fee optimization.
+    NetworkConditionScore,
+    /// Configurable dynamic fee optimization parameters.
+    FeeOptimizationConfig,
+    /// Last recorded contract error report.
+    LastErrorReport,
+    /// Persisted failed fee collection operation for retry.
+    FailedFeeCollection(String),
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct FeeOptimizationConfig {
+    pub max_dynamic_rate_bps: u32,
+    pub congestion_sensitivity_bps: u32,
+    pub min_effective_rate_bps: u32,
+    pub max_retry_attempts: u32,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct ErrorReport {
+    pub category: ErrorCategory,
+    pub strategy: RecoveryStrategy,
+    pub message: String,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct FailedFeeCollection {
+    pub id: String,
+    pub trader: Address,
+    pub token: Address,
+    pub trade_amount: i128,
+    pub trade_asset: Asset,
+    pub retry_count: u32,
+    pub last_error: String,
 }
 
 #[contracttype]
@@ -140,6 +184,67 @@ pub fn get_fee_rate(env: &Env) -> u32 {
 
 pub fn set_fee_rate(env: &Env, rate: u32) {
     env.storage().instance().set(&StorageKey::FeeRate, &rate);
+}
+
+// --- Fee Optimization ---
+
+pub fn get_network_condition_score(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&StorageKey::NetworkConditionScore)
+        .unwrap_or(DEFAULT_NETWORK_SCORE_BPS)
+}
+
+pub fn set_network_condition_score(env: &Env, score: u32) {
+    env.storage()
+        .instance()
+        .set(&StorageKey::NetworkConditionScore, &score);
+}
+
+pub fn get_fee_optimization_config(env: &Env) -> FeeOptimizationConfig {
+    env.storage()
+        .instance()
+        .get(&StorageKey::FeeOptimizationConfig)
+        .unwrap_or(FeeOptimizationConfig {
+            max_dynamic_rate_bps: DEFAULT_FEE_OPTIMIZATION_MAX_RATE_BPS,
+            congestion_sensitivity_bps: DEFAULT_CONGESTION_SENSITIVITY_BPS,
+            min_effective_rate_bps: MIN_FEE_RATE_BPS,
+            max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+        })
+}
+
+pub fn set_fee_optimization_config(env: &Env, config: &FeeOptimizationConfig) {
+    env.storage()
+        .instance()
+        .set(&StorageKey::FeeOptimizationConfig, config);
+}
+
+pub fn get_last_error_report(env: &Env) -> Option<ErrorReport> {
+    env.storage().instance().get(&StorageKey::LastErrorReport)
+}
+
+pub fn set_last_error_report(env: &Env, report: &ErrorReport) {
+    env.storage()
+        .instance()
+        .set(&StorageKey::LastErrorReport, report);
+}
+
+pub fn get_failed_fee_collection(env: &Env, id: &String) -> Option<FailedFeeCollection> {
+    env.storage()
+        .persistent()
+        .get(&StorageKey::FailedFeeCollection(id.clone()))
+}
+
+pub fn set_failed_fee_collection(env: &Env, failed: &FailedFeeCollection) {
+    env.storage()
+        .persistent()
+        .set(&StorageKey::FailedFeeCollection(failed.id.clone()), failed);
+}
+
+pub fn remove_failed_fee_collection(env: &Env, id: &String) {
+    env.storage()
+        .persistent()
+        .remove(&StorageKey::FailedFeeCollection(id.clone()));
 }
 
 // --- Burn Rate ---

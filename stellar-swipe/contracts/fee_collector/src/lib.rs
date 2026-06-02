@@ -6,9 +6,11 @@ pub use errors::ContractError;
 mod events;
 pub use events::{FeeRateUpdated, FeesBurned, FeesClaimed, FirstTradeFeeWaived, TreasuryWithdrawal, WithdrawalQueued};
 use events::{
-    emit_fee_collected, emit_fee_rate_updated, emit_fees_claimed, emit_first_trade_fee_waived,
-    emit_treasury_withdrawal, emit_withdrawal_queued, EvtFeeCollected, EvtFeeRateUpdated,
-    EvtFeesClaimed, EvtTreasuryWithdrawal, EvtWithdrawalQueued,
+    emit_error_reported, emit_fee_collected, emit_fee_rate_updated, emit_fees_claimed,
+    emit_first_trade_fee_waived, emit_network_condition_updated, emit_retry_attempted,
+    emit_treasury_withdrawal, emit_withdrawal_queued, EvtErrorReported, EvtFeeCollected,
+    EvtFeeRateUpdated, EvtFeesClaimed, EvtNetworkConditionUpdated, EvtRetryAttempted,
+    EvtTreasuryWithdrawal, EvtWithdrawalQueued,
 };
 
 mod rebates;
@@ -18,18 +20,23 @@ pub use reports::{EarningsLeaderboardEntry, EarningsReport, ReportPeriod};
 
 mod storage;
 use storage::{
-    get_admin, get_burn_rate, get_fee_rate, get_monthly_trade_volume, get_oracle_contract,
-    get_pending_fees, get_queued_withdrawal, get_treasury_balance, has_traded, is_initialized,
+    get_admin, get_burn_rate, get_fee_rate, get_fee_optimization_config,
+    get_failed_fee_collection, get_last_error_report, get_monthly_trade_volume,
+    get_network_condition_score, get_oracle_contract, get_pending_fees, get_queued_withdrawal,
+    get_treasury_balance, has_traded, is_initialized, remove_failed_fee_collection,
     remove_monthly_trade_volume, remove_queued_withdrawal, set_admin,
-    set_burn_rate as set_burn_rate_storage, set_fee_rate as set_fee_rate_storage, set_has_traded,
-    set_initialized, set_monthly_trade_volume,
+    set_burn_rate as set_burn_rate_storage, set_fee_rate as set_fee_rate_storage,
+    set_fee_optimization_config, set_failed_fee_collection, set_has_traded, set_initialized,
+    set_monthly_trade_volume, set_network_condition_score,
     set_oracle_contract as set_oracle_contract_storage, set_pending_fees, set_queued_withdrawal,
-    set_treasury_balance, MonthlyTradeVolume, QueuedWithdrawal, StorageKey, MAX_BURN_RATE_BPS,
-    MAX_FEE_RATE_BPS, MIN_FEE_RATE_BPS,
+    set_treasury_balance, ErrorReport, FailedFeeCollection, FeeOptimizationConfig,
+    MonthlyTradeVolume, QueuedWithdrawal, StorageKey, MAX_BURN_RATE_BPS, MAX_FEE_RATE_BPS,
+    MIN_FEE_RATE_BPS,
 };
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String};
 
+use shared::errors::{ErrorCategory, RecoveryStrategy};
 use stellar_swipe_common::Asset;
 use stellar_swipe_common::SECONDS_PER_DAY;
 
@@ -351,6 +358,116 @@ impl FeeCollector {
         Ok(())
     }
 
+    /// Admin: update fee optimization settings for dynamic fee adjustments.
+    pub fn set_fee_optimization_config(
+        env: Env,
+        admin: Address,
+        config: FeeOptimizationConfig,
+    ) -> Result<(), ContractError> {
+        if !is_initialized(&env) {
+            return Err(ContractError::NotInitialized);
+        }
+        admin.require_auth();
+        if config.max_dynamic_rate_bps < MIN_FEE_RATE_BPS
+            || config.max_dynamic_rate_bps > MAX_FEE_RATE_BPS
+            || config.congestion_sensitivity_bps > 10_000
+            || config.min_effective_rate_bps < MIN_FEE_RATE_BPS
+            || config.max_retry_attempts > 10
+        {
+            return Err(ContractError::InvalidFeeConfiguration);
+        }
+        set_fee_optimization_config(&env, &config);
+        Ok(())
+    }
+
+    /// Admin: update the network condition score used for dynamic fee pricing.
+    pub fn update_network_conditions(
+        env: Env,
+        admin: Address,
+        score_bps: u32,
+        note: String,
+    ) -> Result<(), ContractError> {
+        if !is_initialized(&env) {
+            return Err(ContractError::NotInitialized);
+        }
+        admin.require_auth();
+        if score_bps > 10_000 {
+            return Err(ContractError::NetworkConditionInvalid);
+        }
+
+        set_network_condition_score(&env, score_bps);
+        emit_network_condition_updated(
+            &env,
+            EvtNetworkConditionUpdated {
+                score_bps,
+                note,
+                updated_at: env.ledger().timestamp(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Admin: queue a failed fee collection for retry.
+    pub fn queue_failed_fee_collection(
+        env: Env,
+        admin: Address,
+        failed: FailedFeeCollection,
+    ) -> Result<(), ContractError> {
+        if !is_initialized(&env) {
+            return Err(ContractError::NotInitialized);
+        }
+        admin.require_auth();
+        set_failed_fee_collection(&env, &failed);
+        Ok(())
+    }
+
+    /// Retry a previously queued fee collection request.
+    pub fn retry_failed_fee_collection(
+        env: Env,
+        admin: Address,
+        id: String,
+    ) -> Result<i128, ContractError> {
+        if !is_initialized(&env) {
+            return Err(ContractError::NotInitialized);
+        }
+        admin.require_auth();
+
+        let failed = get_failed_fee_collection(&env, &id)
+            .ok_or(ContractError::FailedCollectionNotFound)?;
+
+        if failed.retry_count >= get_fee_optimization_config(&env).max_retry_attempts {
+            return Err(ContractError::RetryLimitExceeded);
+        }
+
+        let mut retry_record = failed.clone();
+        retry_record.retry_count = retry_record.retry_count.saturating_add(1);
+        set_failed_fee_collection(&env, &retry_record);
+
+        let result = Self::collect_fee_with_recovery(
+            env.clone(),
+            retry_record.trader.clone(),
+            retry_record.token.clone(),
+            retry_record.trade_amount,
+            retry_record.trade_asset.clone(),
+        );
+
+        emit_retry_attempted(
+            &env,
+            EvtRetryAttempted {
+                id: id.clone(),
+                retry_count: retry_record.retry_count,
+                successful: result.is_ok(),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        if result.is_ok() {
+            remove_failed_fee_collection(&env, &id);
+        }
+
+        result
+    }
+
     /// # Summary
     /// Collect a fee from a trader for a completed trade. Transfers the fee
     /// from the trader to this contract, burns the configured burn slice,
@@ -378,6 +495,35 @@ impl FeeCollector {
         trade_amount: i128,
         trade_asset: Asset,
     ) -> Result<i128, ContractError> {
+        let result = Self::collect_fee_with_recovery(env.clone(), trader.clone(), token.clone(), trade_amount, trade_asset.clone());
+        if let Err(err) = &result {
+            let report = ErrorReport {
+                category: ErrorCategory::ExternalDependency,
+                strategy: RecoveryStrategy::Retry,
+                message: String::from_str(&env, "Fee collection failed, queueing recovery."),
+                timestamp: env.ledger().timestamp(),
+            };
+            set_last_error_report(&env, &report);
+            emit_error_reported(
+                &env,
+                EvtErrorReported {
+                    category: report.category,
+                    strategy: report.strategy,
+                    message: report.message.clone(),
+                    timestamp: report.timestamp,
+                },
+            );
+        }
+        result
+    }
+
+    fn collect_fee_with_recovery(
+        env: Env,
+        trader: Address,
+        token: Address,
+        trade_amount: i128,
+        trade_asset: Asset,
+    ) -> Result<i128, ContractError> {
         if !is_initialized(&env) {
             return Err(ContractError::NotInitialized);
         }
@@ -387,7 +533,6 @@ impl FeeCollector {
             return Err(ContractError::InvalidAmount);
         }
 
-        // Issue #428: waive fee for user's first trade.
         if !has_traded(&env, &trader) {
             set_has_traded(&env, &trader);
             emit_first_trade_fee_waived(&env, &trader);
@@ -395,32 +540,7 @@ impl FeeCollector {
             return Ok(0);
         }
 
-        let base_fee_rate = rebates::get_fee_rate_for_user(&env, &trader);
-
-        // Issue #438: Apply protocol token discount (50% off) if the fee token
-        // matches the configured protocol token.
-        let fee_rate = if let Some(protocol_token) = storage::get_protocol_token(&env) {
-            if token == protocol_token {
-                (base_fee_rate / 2).max(storage::MIN_FEE_RATE_BPS)
-            } else {
-                base_fee_rate
-            }
-        } else {
-            base_fee_rate
-        };
-
-        // Rounding strategy (documented):
-        //   fee = floor(trade_amount * fee_rate / 10_000)
-        //
-        // Floor (truncation) is user-favorable: the trader is never charged more
-        // than their exact pro-rata fee.  The sub-unit remainder stays with the
-        // trader and is NOT retained by the contract, so no unwithdrawable dust
-        // accumulates in the treasury.
-        //
-        // Example: trade_amount=9999, fee_rate=30 bps
-        //   exact fee = 9999 * 30 / 10_000 = 29.997
-        //   charged   = 29  (floor, user-favorable)
-        //   dust      = 0   (remainder stays with trader, not in contract)
+        let fee_rate = Self::effective_fee_rate_for_trade(&env, &trader, &token, &trade_asset)?;
         let fee_amount = fee_amount_floor(trade_amount, fee_rate)
             .ok_or(ContractError::ArithmeticOverflow)?;
 
@@ -434,17 +554,11 @@ impl FeeCollector {
             &fee_amount,
         );
 
-        // ROUNDING STRATEGY: burn slice truncates (rounds down) — provider-favorable.
-        // burn_amount + distributable == fee_amount exactly (no dust):
-        //   distributable = fee_amount - burn_amount
-        // Because burn_amount is truncated, distributable is effectively rounded up,
-        // ensuring every stroop of fee_amount is either burned or credited to the treasury.
         let burn_rate = get_burn_rate(&env);
         let burn_amount = fee_amount
             .checked_mul(burn_rate as i128)
             .and_then(|v| v.checked_div(10_000))
             .ok_or(ContractError::ArithmeticOverflow)?;
-        // distributable = fee_amount - burn_amount: no remainder, no dust possible.
         let distributable = fee_amount
             .checked_sub(burn_amount)
             .ok_or(ContractError::ArithmeticOverflow)?;
@@ -458,7 +572,6 @@ impl FeeCollector {
             .publish(&env);
         }
 
-        // Issue #442: Allocate a portion of distributable to revenue share pool
         let revenue_share_rate = storage::get_revenue_share_rate_bps(&env);
         let revenue_share_amount = distributable
             .checked_mul(revenue_share_rate as i128)
@@ -466,7 +579,6 @@ impl FeeCollector {
             .unwrap_or(0);
         let treasury_credit = distributable.saturating_sub(revenue_share_amount);
 
-        // Add revenue share to the pool for this token
         if revenue_share_amount > 0 {
             storage::add_revenue_share_pool(&env, &token, revenue_share_amount);
         }
@@ -490,6 +602,45 @@ impl FeeCollector {
         );
 
         Ok(fee_amount)
+    }
+
+    fn effective_fee_rate_for_trade(
+        env: &Env,
+        trader: &Address,
+        token: &Address,
+        trade_asset: &Asset,
+    ) -> Result<u32, ContractError> {
+        let base_rate = rebates::get_fee_rate_for_user(env, trader);
+        let config = get_fee_optimization_config(env);
+        let network_score = get_network_condition_score(env);
+
+        let network_adjustment = (network_score as u64)
+            .saturating_mul(config.congestion_sensitivity_bps as u64)
+            .checked_div(10_000)
+            .unwrap_or(0) as u32;
+
+        let mut fee_rate = base_rate.saturating_add(network_adjustment);
+        fee_rate = fee_rate.max(config.min_effective_rate_bps);
+        fee_rate = fee_rate.min(config.max_dynamic_rate_bps.min(MAX_FEE_RATE_BPS));
+
+        if let Some(protocol_token) = storage::get_protocol_token(env) {
+            if token == &protocol_token {
+                fee_rate = (fee_rate / 2).max(MIN_FEE_RATE_BPS);
+            }
+        }
+
+        Ok(fee_rate)
+    }
+
+    /// Returns the current dynamic fee rate for a trade after tiered rebates and
+    /// network condition adjustments are applied.
+    pub fn current_dynamic_fee_rate(
+        env: Env,
+        trader: Address,
+        token: Address,
+        trade_asset: Asset,
+    ) -> Result<u32, ContractError> {
+        Self::effective_fee_rate_for_trade(&env, &trader, &token, &trade_asset)
     }
 
     /// Claim all pending fee earnings for a provider and token.

@@ -1,4 +1,5 @@
-use soroban_sdk::{contractevent, Address, Env, Symbol};
+use soroban_sdk::{contractevent, Address, Env, Symbol, String};
+use shared::errors::{ErrorCategory, RecoveryStrategy};
 
 #[contractevent]
 pub struct WithdrawalQueued {
@@ -36,6 +37,29 @@ pub struct FeesBurned {
     pub token: Address,
 }
 
+#[contractevent]
+pub struct NetworkConditionUpdated {
+    pub score_bps: u32,
+    pub note: String,
+    pub updated_at: u64,
+}
+
+#[contractevent]
+pub struct ErrorReported {
+    pub category: ErrorCategory,
+    pub strategy: RecoveryStrategy,
+    pub message: String,
+    pub timestamp: u64,
+}
+
+#[contractevent]
+pub struct RetryAttempted {
+    pub id: String,
+    pub retry_count: u32,
+    pub successful: bool,
+    pub timestamp: u64,
+}
+
 /// Emitted when a user's first trade fee is waived (Issue #428).
 #[contractevent]
 pub struct FirstTradeFeeWaived {
@@ -62,6 +86,26 @@ pub struct EvtFeeRateUpdated {
     pub old_rate: u32,
     pub new_rate: u32,
     pub updated_by: Address,
+}
+
+pub struct EvtNetworkConditionUpdated {
+    pub score_bps: u32,
+    pub note: String,
+    pub updated_at: u64,
+}
+
+pub struct EvtErrorReported {
+    pub category: ErrorCategory,
+    pub strategy: RecoveryStrategy,
+    pub message: String,
+    pub timestamp: u64,
+}
+
+pub struct EvtRetryAttempted {
+    pub id: String,
+    pub retry_count: u32,
+    pub successful: bool,
+    pub timestamp: u64,
 }
 
 pub struct EvtFeeCollected {
@@ -110,6 +154,36 @@ pub fn emit_fee_rate_updated(env: &Env, evt: EvtFeeRateUpdated) {
             Symbol::new(env, "fee_rate_updated"),
         ),
         (evt.old_rate, evt.new_rate, evt.updated_by),
+    );
+}
+
+pub fn emit_network_condition_updated(env: &Env, evt: EvtNetworkConditionUpdated) {
+    env.events().publish(
+        (
+            Symbol::new(env, "fee_collector"),
+            Symbol::new(env, "network_condition_updated"),
+        ),
+        (evt.score_bps, evt.note, evt.updated_at),
+    );
+}
+
+pub fn emit_error_reported(env: &Env, evt: EvtErrorReported) {
+    env.events().publish(
+        (
+            Symbol::new(env, "fee_collector"),
+            Symbol::new(env, "error_reported"),
+        ),
+        (evt.category, evt.strategy, evt.message, evt.timestamp),
+    );
+}
+
+pub fn emit_retry_attempted(env: &Env, evt: EvtRetryAttempted) {
+    env.events().publish(
+        (
+            Symbol::new(env, "fee_collector"),
+            Symbol::new(env, "retry_attempted"),
+        ),
+        (evt.id, evt.retry_count, evt.successful, evt.timestamp),
     );
 }
 

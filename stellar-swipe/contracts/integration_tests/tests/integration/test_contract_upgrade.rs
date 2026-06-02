@@ -630,3 +630,47 @@ fn multiple_users_state_preserved() {
         assert_eq!(pos.entry_price, (i as i128 + 1) * 50);
     }
 }
+
+#[test]
+fn upgrade_rollback_simulation_preserves_state() {
+    let (env, cid, _admin) = setup();
+    let user = Address::generate(&env);
+    let v1 = ContractV1Client::new(&env, &cid);
+
+    let tid = v1.open_position(&user, &250i128, &125i128);
+    v1.set_signal(&Signal { id: 77, price: 135_000, asset: 9 });
+
+    env.register_at(&cid, ContractV2, ());
+    let v2 = ContractV2Client::new(&env, &cid);
+    assert_eq!(v2.get_version(), String::from_str(&env, "2.0.0"));
+
+    // Simulate an upgrade rollback by returning to V1 implementation at the same address.
+    env.register_at(&cid, ContractV1, ());
+    let v1_again = ContractV1Client::new(&env, &cid);
+
+    let pos = v1_again.get_position(&tid).unwrap();
+    assert_eq!(pos.user, user);
+    assert_eq!(pos.entry_price, 125);
+    assert_eq!(v1_again.get_signal(&77u64).unwrap().price, 135_000);
+}
+
+#[test]
+fn pre_upgrade_validation_checks_state_before_upgrade() {
+    let (env, cid, _admin) = setup();
+    let user = Address::generate(&env);
+    let v1 = ContractV1Client::new(&env, &cid);
+
+    let tid = v1.open_position(&user, &500i128, &300i128);
+    v1.set_auth(&user, &AuthConfig { authorized: true, max_amount: 2_000 });
+
+    // Validate pre-upgrade state before re-registering V2.
+    assert!(v1.get_position(tid.clone()).is_some());
+    assert!(v1.get_auth(user.clone()).unwrap().authorized);
+
+    env.register_at(&cid, ContractV2, ());
+    let v2 = ContractV2Client::new(&env, &cid);
+
+    // Ensure pre-upgrade state remains intact after upgrade.
+    assert_eq!(v2.get_position_v2(&tid).unwrap().entry_price, 300);
+    assert_eq!(v2.get_auth_v2(&user).unwrap().max_amount, 2_000);
+}
